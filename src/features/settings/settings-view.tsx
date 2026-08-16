@@ -4,7 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { probeBackend } from "@/backends/capability-probe";
-import type { CatalogModel } from "@/backends/model-catalog";
+import { classifyModel, sortForBrowsing, type CatalogModel } from "@/backends/model-catalog";
 import {
   CAPABILITIES,
   MODEL_KINDS,
@@ -52,8 +52,24 @@ const CAPABILITY_LABELS: Record<Capability, string> = {
   stt: "语音转写",
 };
 
+/**
+ * 模型页上的改动先攒在这里，点保存才落盘。
+ *
+ * 三样都进草稿：勾选、归类、图片路由 —— 一个面板里有的控件即时生效、
+ * 有的要点保存，迟早有人踩。null 表示没有改动，这样干净时永远跟着后端配置走，
+ * 不用写同步逻辑。
+ *
+ * 状态由 Console 持有而不是这里 —— 设置页一关就卸载，草稿放在这里的话
+ * 勾了一半点去对话面板就没了。
+ */
+export type ModelDraft = {
+  savedModels: string[];
+  modelOverrides: Record<string, ModelKind>;
+  imageRouteOverrides: Record<string, string>;
+};
+
 export function SettingsView({
-  backend, models, loading, error, onRefresh, onPatch, onRemove, onAdd,
+  backend, models, loading, error, onRefresh, onPatch, onRemove, onAdd, draft, onDraftChange,
 }: {
   backend: Backend;
   models: CatalogModel[];
@@ -63,6 +79,8 @@ export function SettingsView({
   onPatch: (changes: Partial<Backend>) => void;
   onRemove: () => void;
   onAdd: () => void;
+  draft: ModelDraft | null;
+  onDraftChange: (draft: ModelDraft | null) => void;
 }) {
   return (
     <div className="mx-auto flex h-full max-w-2xl flex-col gap-3 p-4">
@@ -81,6 +99,7 @@ export function SettingsView({
           <ModelSection
             backend={backend} models={models} loading={loading} error={error}
             onRefresh={onRefresh} onPatch={onPatch}
+            draft={draft} onDraftChange={onDraftChange}
           />
         </TabsContent>
         <TabsContent value="routes" className="min-h-0 flex-1 overflow-y-auto">
@@ -233,7 +252,7 @@ function BackendSection({
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 
 function ModelSection({
-  backend, models, loading, error, onRefresh, onPatch,
+  backend, models, loading, error, onRefresh, onPatch, draft, onDraftChange,
 }: {
   backend: Backend;
   models: CatalogModel[];
@@ -241,47 +260,75 @@ function ModelSection({
   error: string;
   onRefresh: () => void;
   onPatch: (changes: Partial<Backend>) => void;
+  draft: ModelDraft | null;
+  onDraftChange: (draft: ModelDraft | null) => void;
 }) {
   const [query, setQuery] = useState("");
-  const savedCount = models.filter((model) => model.saved).length;
   const routes = useMemo(() => listImageRoutes(backend), [backend]);
   const defaultRouteName = routes.find((route) => route.id === backend.defaultImageRoute)?.name ?? "图片端点";
 
-  const filtered = useMemo(() => {
+  const current: ModelDraft = draft ?? {
+    savedModels: backend.savedModels,
+    modelOverrides: backend.modelOverrides,
+    imageRouteOverrides: backend.imageRouteOverrides,
+  };
+  const dirty = draft !== null;
+  const savedSet = useMemo(() => new Set(current.savedModels), [current.savedModels]);
+  // 按目录里实际存在的算，别把上游已经下掉的模型也数进去
+  const checkedCount = models.reduce((total, model) => total + (savedSet.has(model.id) ? 1 : 0), 0);
+
+  /**
+   * 排序只按提供商和 id，勾选与否不影响位置 ——
+   * 这一页是一边扫一边勾的，列表不该在手底下动。
+   */
+  const listed = useMemo(() => {
+    const sorted = sortForBrowsing(models);
     const keyword = query.trim().toLowerCase();
-    if (!keyword) return models;
-    return models.filter((model) =>
+    if (!keyword) return sorted;
+    return sorted.filter((model) =>
       model.id.toLowerCase().includes(keyword) || model.vendor.toLowerCase().includes(keyword),
     );
   }, [models, query]);
 
+  function edit(patch: Partial<ModelDraft>): void {
+    onDraftChange({ ...current, ...patch });
+  }
+
   function toggle(modelId: string): void {
-    onPatch({
-      savedModels: backend.savedModels.includes(modelId)
-        ? backend.savedModels.filter((id) => id !== modelId)
-        : [...backend.savedModels, modelId],
+    edit({
+      savedModels: savedSet.has(modelId)
+        ? current.savedModels.filter((id) => id !== modelId)
+        : [...current.savedModels, modelId],
     });
   }
 
   function setKind(modelId: string, kind: ModelKind): void {
-    const next = { ...backend.modelOverrides };
+    const next = { ...current.modelOverrides };
     if (kind === "auto") delete next[modelId];
     else next[modelId] = kind;
-    onPatch({ modelOverrides: next });
+    edit({ modelOverrides: next });
   }
 
   function setRoute(modelId: string, routeId: string): void {
-    const next = { ...backend.imageRouteOverrides };
+    const next = { ...current.imageRouteOverrides };
     if (!routeId) delete next[modelId];
     else next[modelId] = routeId;
-    onPatch({ imageRouteOverrides: next });
+    edit({ imageRouteOverrides: next });
+  }
+
+  /** 草稿里的归类，跟 model-catalog 的 decorate 同一套规则。 */
+  function kindOf(model: CatalogModel): CatalogModel["kind"] {
+    const override = current.modelOverrides[model.id];
+    return override && override !== "auto" ? override : classifyModel(model.id);
   }
 
   return (
     <section className="flex min-h-0 flex-1 flex-col rounded-lg border">
       <div className="flex items-center gap-2 border-b p-3">
         <h2 className="text-sm font-medium">模型</h2>
-        <span className="text-xs text-muted-foreground">已保存 {savedCount} / {models.length}</span>
+        <span className="text-xs text-muted-foreground">
+          {dirty ? `已勾 ${checkedCount} / ${models.length}` : `已保存 ${checkedCount} / ${models.length}`}
+        </span>
         <Button variant="ghost" size="icon" className="ml-auto size-8" onClick={onRefresh} disabled={loading} aria-label="刷新模型列表">
           <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
         </Button>
@@ -304,53 +351,83 @@ function ModelSection({
             />
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-1">
-            {filtered.map((model) => (
-              <div key={model.id} className={cn("rounded-sm", model.saved && "bg-accent/50")}>
-                <button
-                  type="button"
-                  onClick={() => toggle(model.id)}
-                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
-                >
-                  <span className={cn(
-                    "flex size-4 shrink-0 items-center justify-center rounded border",
-                    model.saved && "border-primary bg-primary text-primary-foreground",
-                  )}>
-                    {model.saved ? <Check className="size-3" /> : null}
-                  </span>
-                  <span className={cn(
-                    "w-11 shrink-0 rounded bg-secondary px-1 text-center text-[10px]",
-                    model.overridden && "bg-primary/15 text-primary",
-                  )}>
-                    {model.kind}
-                  </span>
-                  <span className="truncate font-mono">{model.displayName ?? model.id}</span>
-                  {model.reasoning ? <span className="shrink-0 text-[10px] text-muted-foreground">推理</span> : null}
-                  <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{model.vendor}</span>
-                </button>
+            {listed.map((model) => {
+              const checked = savedSet.has(model.id);
+              const kind = kindOf(model);
+              const overridden = Boolean(current.modelOverrides[model.id] && current.modelOverrides[model.id] !== "auto");
+              return (
+                <div key={model.id} className={cn("rounded-sm", checked && "bg-accent/50")}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(model.id)}
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                  >
+                    <span className={cn(
+                      "flex size-4 shrink-0 items-center justify-center rounded border",
+                      checked && "border-primary bg-primary text-primary-foreground",
+                    )}>
+                      {checked ? <Check className="size-3" /> : null}
+                    </span>
+                    <span className={cn(
+                      "w-11 shrink-0 rounded bg-secondary px-1 text-center text-[10px]",
+                      overridden && "bg-primary/15 text-primary",
+                    )}>
+                      {kind}
+                    </span>
+                    <span className="truncate font-mono">{model.displayName ?? model.id}</span>
+                    {model.reasoning ? <span className="shrink-0 text-[10px] text-muted-foreground">推理</span> : null}
+                    <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{model.vendor}</span>
+                  </button>
 
-                {model.saved ? (
-                  <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 pl-8">
-                    <MiniSelect
-                      value={backend.modelOverrides[model.id] ?? "auto"}
-                      onChange={(value) => setKind(model.id, value as ModelKind)}
-                      ariaLabel={`${model.id} 归到哪个面板`}
-                      options={MODEL_KINDS.map((kind) => ({ value: kind, label: KIND_LABELS[kind] }))}
-                    />
-                    {model.kind === "image" ? (
+                  {checked ? (
+                    <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 pl-8">
                       <MiniSelect
-                        value={backend.imageRouteOverrides[model.id] ?? "__default"}
-                        onChange={(value) => setRoute(model.id, value === "__default" ? "" : value)}
-                        ariaLabel={`${model.id} 走哪条图片路由`}
-                        options={[
-                          { value: "__default", label: `默认（${defaultRouteName}）` },
-                          ...routes.map((route) => ({ value: route.id, label: route.name })),
-                        ]}
+                        value={current.modelOverrides[model.id] ?? "auto"}
+                        onChange={(value) => setKind(model.id, value as ModelKind)}
+                        ariaLabel={`${model.id} 归到哪个面板`}
+                        options={MODEL_KINDS.map((item) => ({ value: item, label: KIND_LABELS[item] }))}
                       />
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ))}
+                      {kind === "image" ? (
+                        <MiniSelect
+                          value={current.imageRouteOverrides[model.id] ?? "__default"}
+                          onChange={(value) => setRoute(model.id, value === "__default" ? "" : value)}
+                          ariaLabel={`${model.id} 走哪条图片路由`}
+                          options={[
+                            { value: "__default", label: `默认（${defaultRouteName}）` },
+                            ...routes.map((route) => ({ value: route.id, label: route.name })),
+                          ]}
+                        />
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-2 border-t p-3">
+            <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+              {dirty ? "改动还没生效，点保存。" : "勾好后点保存。聊天时的模型选择器只显示保存过的。"}
+            </p>
+            {dirty ? (
+              <Button variant="ghost" size="sm" className="h-8 shrink-0 text-xs" onClick={() => onDraftChange(null)}>
+                放弃
+              </Button>
+            ) : null}
+            <Button
+              size="sm" className="h-8 shrink-0 text-xs" disabled={!dirty}
+              onClick={() => {
+                onPatch({
+                  savedModels: current.savedModels,
+                  modelOverrides: current.modelOverrides,
+                  imageRouteOverrides: current.imageRouteOverrides,
+                });
+                onDraftChange(null);
+                toast.success(`已保存 ${checkedCount} 个模型`);
+              }}
+            >
+              保存
+            </Button>
           </div>
         </>
       )}

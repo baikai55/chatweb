@@ -73,6 +73,19 @@
 用推断结果）+ 图片模型额外一个路由下拉。只对已保存的模型显示 —— 没保存的模型
 改归类没有意义，68 行全塞控件也没法看。被覆盖过的 kind 徽章会变色。
 
+**3.5 模型页改成攒着改、点保存**（用户反馈：勾一下就刷新回顶部，体感不好）：
+
+- 根因是 `savedModels` 和 `modelOverrides` 进了 react-query 的 query key，
+  每勾一下都算一次新查询，列表整段变 loading 再挂回来，滚动位置直接丢。
+  key 现在只留 `backend.id` + `baseURL`（真正影响网络结果的东西），
+  勾选/归类这些只影响标注，用 `applyBackendConfig()` 在查询外面重算。
+- 勾选、归类、图片路由三样一起进一个 `ModelDraft`，底部「保存 / 放弃」。
+  `null` 表示没改动，干净时永远跟着后端配置走，不用写同步逻辑。
+- 草稿 state 放在 `Console` 而不是设置页 —— 设置页一关就卸载，
+  勾了一半跳去看一眼对话再回来不该白勾。
+- 设置页排序换成 `sortForBrowsing()`，只按提供商和 id，勾选与否不影响位置。
+  「已保存的排最前」那个排序只对模型选择器有意义，在这一页会让列表在手底下动。
+
 **4. 行为设置** —— `src/shared/settings/app-settings.ts`（localStorage + zod，
 和 backend-store 同一套路）：提交方式、提交后清空输入框、任务完成通知。
 `shouldSubmitOnKey()` 统一四个面板的键盘判定；`enter` 档下 Ctrl/⌘+Enter 也照发，

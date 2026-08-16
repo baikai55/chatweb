@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, Plus } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -8,14 +8,14 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { probeBackend } from "@/backends/capability-probe";
-import { fetchModels, modelsForKind, savedModelsOnly } from "@/backends/model-catalog";
+import { applyBackendConfig, fetchModels, modelsForKind, savedModelsOnly } from "@/backends/model-catalog";
 import { useBackends } from "@/backends/use-backends";
 import { createBackend, normalizeBaseURL, type Backend } from "@/backends/types";
 import { AppShell, type ConsoleMode } from "@/app/app-shell";
 import { ChatPanel } from "@/features/console/chat-panel";
 import { useChatSessions } from "@/features/console/use-chat-sessions";
 import { ImagePanel } from "@/features/image/image-panel";
-import { SettingsView } from "@/features/settings/settings-view";
+import { SettingsView, type ModelDraft } from "@/features/settings/settings-view";
 import { VideoPanel } from "@/features/video/video-panel";
 import { VoicePanel } from "@/features/voice/voice-panel";
 
@@ -67,14 +67,29 @@ function Console({
 }) {
   const [mode, setMode] = useState<ConsoleMode>("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /**
+   * 模型页的草稿放在这里而不是设置页里 —— 设置页一关就卸载，
+   * 勾了一半跳去看一眼对话再回来不该白勾。
+   */
+  const [modelDraft, setModelDraft] = useState<ModelDraft | null>(null);
 
+  /**
+   * query key 里只放会改变网络结果的东西。
+   * 勾选、归类覆盖这些只影响标注，放进 key 会让每勾一下都变成一次新查询
+   * —— 设置页列表会整段闪一下并滚回顶部。标注在下面用 applyBackendConfig 重算。
+   */
   const models = useQuery({
-    queryKey: ["models", backend.id, backend.baseURL, backend.savedModels, backend.modelOverrides],
+    queryKey: ["models", backend.id, backend.baseURL],
     queryFn: ({ signal }) => fetchModels(backend, { signal }),
     retry: false,
   });
 
-  const saved = savedModelsOnly(models.data ?? []);
+  const decorated = useMemo(
+    () => applyBackendConfig(models.data ?? [], backend),
+    [models.data, backend],
+  );
+
+  const saved = savedModelsOnly(decorated);
   const chatModels = modelsForKind(saved, "chat");
   const chat = useChatSessions(backend.id, chatModels[0]?.id ?? "");
 
@@ -96,13 +111,15 @@ function Console({
       {settingsOpen ? (
         <SettingsView
           backend={backend}
-          models={models.data ?? []}
+          models={decorated}
           loading={models.isPending}
           error={models.isError ? (models.error instanceof Error ? models.error.message : String(models.error)) : ""}
           onRefresh={() => { void fetchModels(backend, { force: true }).then(() => models.refetch()); }}
           onPatch={onPatch}
           onRemove={onRemove}
           onAdd={onAdd}
+          draft={modelDraft}
+          onDraftChange={setModelDraft}
         />
       ) : mode === "chat" ? (
         <ChatPanel

@@ -72,6 +72,29 @@ export async function readCachedModels(backend: Backend): Promise<CatalogModel[]
   return cached ? decorate(cached.rows, backend) : null;
 }
 
+/**
+ * 用当前后端配置重新标注一份已有目录，不打网络。
+ *
+ * 勾选、改归类这些只影响标注，不影响网络数据。所以这些字段**不该进 query key**
+ * —— 进了就等于每勾一下都算一个新查询，列表会整段换成 loading 再挂回来，
+ * 滚动位置直接丢。改成拉取按 id + 地址缓存，标注在外面这一层重算。
+ */
+export function applyBackendConfig(models: CatalogModel[], backend: Backend): CatalogModel[] {
+  return decorate(models, backend);
+}
+
+/**
+ * 设置页用的顺序：只按提供商和 id 排，勾选与否不影响位置。
+ *
+ * 那里是一边扫一边勾，列表不该在手底下动 —— "已保存的排最前"只对模型选择器有意义。
+ */
+export function sortForBrowsing(models: CatalogModel[]): CatalogModel[] {
+  return [...models].sort((a, b) => {
+    if (a.vendor !== b.vendor) return a.vendor.localeCompare(b.vendor, "zh-CN");
+    return a.id.localeCompare(b.id, "zh-CN");
+  });
+}
+
 async function fetchFromNetwork(backend: Backend, signal?: AbortSignal): Promise<CachedCatalog["rows"]> {
   const headers = new Headers({ Accept: "application/json" });
   if (backend.apiKey) headers.set("Authorization", `Bearer ${backend.apiKey}`);
