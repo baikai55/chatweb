@@ -13,19 +13,19 @@
 | chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 两个后端实测通过 |
 | 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状 |
 | 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod |
-| 能力探测 | `src/backends/capability-probe.ts` | ✅ 无鉴权 POST `{}`，404=不存在 |
-| 模型目录 | `src/backends/model-catalog.ts` | ✅ 85 个真实模型回归验证过 |
-| IndexedDB | `src/shared/db/idb.ts` | ✅ 手写封装，无第三方依赖 |
+| 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
+| IndexedDB | `src/shared/db/idb.ts` | ✅ 手写封装，无第三方依赖；v2 加了 generations |
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
+| 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条 |
 | Markdown + XSS 清洗 | `src/features/console/markdown.ts` | ✅ 从 grok2api 移植 |
 | 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误 |
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
-| 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按后端能力显隐、移动端抽屉 |
+| 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
 | 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 参数控制、URL/Base64、流式兼容、预览与下载 |
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
 | 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写 |
-| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、能力手勾、模型归类覆盖、图片路由、行为设置 |
+| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类覆盖、图片路由、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
 | 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知 |
 | Worker | `worker/*.ts` | ✅ R2 上传往返字节一致、路径穿越已挡、CSP 已下发 |
@@ -36,15 +36,77 @@
 本轮再次运行过 `pnpm check` 和 `pnpm build`，均通过。Vite 仅提示主包超过
 500 KB，不影响构建产物。
 
-## 本轮（设置页重做 + 图片路由）
+## 本轮（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
+
+三件用户点名的事，都做完了。`pnpm check`、`pnpm build` 干净，`pnpm test` 35 个用例全过。
+
+**1. 能力探测整个删掉** —— 用户原话：「这个探测功能不要了，有些站发现测活会封号的」。
+
+`src/backends/capability-probe.ts` **已删除**，不是隐藏按钮。原来它对 5 个端点各发一次
+无鉴权 `POST {}`，靠「404 就是没这个路由」推断能力 —— 判定逻辑本身是对的
+（也确实不能用 OPTIONS，CPA 的 CORS 中间件对任何路径包括不存在的都返 204），
+但密集小请求会被一些站判成测活直接封号，这个风险不值得为一个便利功能承担。
+
+探测原本提供两样东西，分别有了替代：
+
+- **侧边栏显示哪几个面板** → 设置页手动勾（`backend.capabilities`）。
+  **为空表示「不知道」，此时全部显示** —— 老配置和导入的配置会走到这里。
+  宁可让用户点进去看到真实报错，也别把功能藏了。
+- **后端方言** → 挪到拉模型列表时白捡：`readFlavor(headers)` 只读 `/models` 的响应头
+  （`X-CPA-Version` / `X-Request-ID`），而这个请求本来就要发，不额外出网。
+
+`Backend.probedAt` 字段一并删了，i18n 里的 probe* 文案也清了。
+
+**2. 模型列表改成手动拉** —— `model-catalog.ts` 拆成两个函数：
+
+- `readModelCatalog(backend)` —— **只读 IndexedDB 缓存，一个请求都不发**。进页面走这条。
+- `refreshModelCatalog(backend, signal?)` —— 真正出网，只有点设置页的「获取模型」按钮才调。
+  一次拉取实际是三个请求（`/v1/models` 加两个富字段端点）。
+
+`isCatalogStale(fetchedAt)` 超过 24 小时返回 true，列表底部标一句「可能过期了」，
+**但不自动重拉**。原则是所有出网请求都由用户点出来。
+
+**3. 联网搜索按钮**（用户问「联网搜索我看怎么没有了」）—— 它其实没被删，是被
+vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空消失，看起来像功能丢了。
+新增 `webSearchSupport(model)` 返回 `{supported, reason}`，按钮**一直渲染**，
+不支持时是禁用态 + tooltip 说明原因（Claude 得走 `/v1/messages`，还没做）。
+注释里写死了「不要用它决定按钮显不显示」，免得下次又被改回隐藏。
+
+**4. 生图/视频/语音的历史记录** —— 用户原话：「只有聊天有记录保存，这个都得有比较好一点」。
+
+新增 `src/features/history/`：
+
+- `generation-store.ts` —— IndexedDB `generations` 表（DB_VERSION 1→2），
+  索引 `[scope, kind, createdAt]`，一次查询直接拿到「当前后端 + 当前面板」那批。
+  每后端每面板留最近 50 条，超了删最旧的。
+- `use-generation-history.ts` —— `useGenerationHistory(scope, kind)`。
+- `generation-history.tsx` —— 面板顶部的折叠抽屉，逐条删 + 清空本面板。
+
+**存 URL 还是存字节，按来源分**（`toAsset()` 里的判断）：
+
+| 来源 | 存法 | 为什么 |
+|---|---|---|
+| 图片 `data:` URL | 转 Blob | IndexedDB 存二进制比存 base64 文本省约四分之一 |
+| 图片远程 URL | 原样存字符串 | 抓字节没必要 |
+| 视频 | 一律远程 URL | 链接会过期，但那是链接本身的性质，抓字节也救不了已经过期的 |
+| TTS 音频 | **必须转 Blob** | TTS 只有二进制响应，`blob:` URL 一刷新就失效，不转就等于没存 |
+| STT | 只有文本 | —— |
+
+读取时 `hydrateAssets(record)` 把 Blob 现造成 `blob:` URL 并返回 `release()`，
+面板用 `releaseRef` 在切换记录和卸载时撤销，否则每点一条历史泄一个 object URL。
+
+**5. 删除全部记录** —— 设置页「行为」标签底部，两步确认。
+清掉所有后端的对话和生成记录，**但不动后端配置、密钥和模型缓存** ——
+那些删了得重新填一遍，跟「清历史」不是一回事。清完通过 `historyToken` 让会话 hook 重载。
+
+## 上一轮（设置页重做 + 图片路由）
 
 用户点名要借鉴 `gpt-image-playground`，选了四块全做。都做完了，`pnpm check`、
 `pnpm build`、`pnpm test` 干净。设置页从 `app.tsx` 里搬进
 `src/features/settings/settings-view.tsx`，拆成四个标签页。
 
 **1. 后端可编辑**：名称 / 地址 / 密钥就地改，有「还原」；能力五个 chip 可手动勾；
-「重新探测」按钮。探测那段说明里写明了**别反复点**（会被当测活），
-未保存的改动会禁用探测按钮，免得探的是旧地址。
+当时还有个「重新探测」按钮 —— **下一轮已整个删除**，见上面的「本轮」。
 
 **2. 图片路由**（核心）—— `src/transport/image-routes.ts`：
 
@@ -97,11 +159,12 @@
 顺手修了一个真 bug：模型缓存只按 `backend.id` 存，**改了 baseURL 还会命中旧缓存**
 （24 小时 TTL）。缓存记录现在带 `baseURL`，不匹配就重拉。
 
-**测试**：装了 vitest，`pnpm test`。31 个用例覆盖模板展开、路由选择与回落、
+**测试**：装了 vitest，`pnpm test`。当轮 31 个用例覆盖模板展开、路由选择与回落、
 `routeVariables`、`selectByPath`、以及各种响应形状的取图（含 markdown 正文、
 去重、错误信息里的链接不误报）。这些都是纯函数，不打网络。
+（下一轮加了 `chat-completions.test.ts` 的 4 个 `webSearchSupport` 用例，现在共 35 个。）
 
-## 上一轮（用真实 key 实测后端）
+## 更早（用真实 key 实测后端）
 
 两个后端的 key 都验证可用。实测发现并修掉了三个语音的真 bug —— 都是「UI 允许但
 上游拒绝」，不实跑发现不了：
@@ -136,17 +199,24 @@
    - grok2api 走 `chat` 路由生图。用户说它支持这个格式，但没验过响应形状。
    验的时候记住下面那条红线，一次一个请求，不要扫参数。
 4. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
-5. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
-   CPA 的 `/responses` 和 `/messages` 都确认存在（无鉴权 401、带 key 400），
+5. **本轮新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
+   带着旧会话数据的库升级没验；生成记录攒满 50 条后的裁剪也只是代码层面正确。
+   还有 `hydrateAssets` 的 `blob:` URL 释放 —— 逻辑对，但没在真实使用中观察过内存。
+6. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
+   CPA 的 `/responses` 和 `/messages` 都确认存在（上一轮实测：无鉴权 401、带 key 400），
    要做的话有端点可打。目前只实现了 chat/completions。
-6. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
+   顺带这也是联网搜索给 Claude 补上的前提 —— 得走 `/v1/messages`。
+7. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
    真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
 
 ## ⚠️ 联调时的红线
 
 **不要连续发大量低 token 的探测请求** —— 会被上游判定成测活行为，导致 API 被封。
-上一轮就是这么踩到的。要验证协议行为时：想清楚一次请求要回答哪几个问题，
-合并成尽量少的请求，不要写 for 循环扫参数矩阵。
+上一轮就是这么踩到的，能力探测功能也因此被整个删掉。要验证协议行为时：
+想清楚一次请求要回答哪几个问题，合并成尽量少的请求，不要写 for 循环扫参数矩阵。
+
+配套的产品原则：**所有出网请求都由用户点出来**。进页面只读本地缓存，
+模型列表、方言识别一概不自动触发。加新功能时守住这条。
 
 ## 设计约束（用户明确说过的）
 
@@ -156,6 +226,10 @@
   那一套，用户明确说不要）。空状态用朴素一句话。
 - **模型不做「没保存就显示全部」的降级** —— 用户明确否决过。一个都没保存时
   给提示并引导去设置页。
+- **不做能力探测**，用户明确否决过（「有些站发现测活会封号的」）。
+  面板显隐手动勾，`capabilities` 为空时全显示。
+- **功能不支持时禁用而不是隐藏**。联网搜索按钮吃过这个亏 —— 隐藏之后用户
+  只会以为功能没了。给禁用态 + 说明原因。
 - 值得借鉴：`https://github.com/baikai55/gpt-image-playground`（已设为 public，TypeScript，
   142 个文件）。用户说它的设置页功能齐全。**本轮已借鉴**：custom provider 的
   `$` 模板 + 点号取图路径设计进了 `image-routes.ts`；`GeneralSettingsTab` 的
@@ -173,7 +247,11 @@
 
 R2 桶名 `chatweb` 已填进 `wrangler.toml`。
 
-### 两个后端的端点实况（实测状态码，404 = 不存在）
+### 两个后端的端点实况（上一轮实测记录，404 = 不存在）
+
+这张表是**历史实测结果的留档**，不是运行时行为 —— 现在代码不做任何端点探测，
+面板显隐完全看用户在设置页勾了什么。留着是因为下次要接新后端时，
+知道这两台的实况能省事。
 
 | 端点 | CPA | grok2api |
 |---|---|---|
@@ -214,7 +292,10 @@ grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准
   `Gemini 2.5 Flash Preview TTS` 三种风格。匹配前必须归一化分隔符
   （`normalizeModelId`），否则带空格的全漏。
 - **`grok-4.20-0309-non-reasoning` 会被 `-reasoning` 规则反向误报**，必须先排除。
-- **能力探测不能用 OPTIONS** —— CPA 的 CORS 中间件对任何路径都返回 204。
+- **能力探测这条路整个废了**。曾经用无鉴权 `POST {}` 靠 404 判断路由是否存在
+  （不能用 OPTIONS —— CPA 的 CORS 中间件对任何路径包括不存在的都返回 204）。
+  判定逻辑本身没错，但密集小请求会被一些站判成测活封号，所以整个模块删了，
+  改成手动勾。**别因为「这个逻辑挺聪明」再把它加回来。**
 - **块注释里别写 `*/`** —— 上一轮在注释里写路径 `internal/translator/*/openai/...`
   把注释提前闭合了，构建直接炸。
 - **`with_timestamps: true` 在这台 grok2api 上拿不到结果** —— 连续两次都返回

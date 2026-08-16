@@ -19,8 +19,12 @@ import {
  *
  * IndexedDB 是异步的，所以初始状态是"空列表 + 一个新建的空会话"，
  * 读完再填。这样首屏不会卡在 loading 上，用户可以直接开始打字。
+ *
+ * `reloadToken` 变了就重新读一遍 —— 设置页「删除全部记录」之后，
+ * 这个 hook 挂在 Console 上不会卸载，得有人告诉它库里已经空了。
+ * （三个生成面板的历史不用管：设置页打开时它们本来就被卸载了，回来自然重读。）
  */
-export function useChatSessions(scope: string, defaultModel: string) {
+export function useChatSessions(scope: string, defaultModel: string, reloadToken = 0) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [current, setCurrent] = useState<ChatSession>(() => createBlankSession(scope, defaultModel));
   const [loading, setLoading] = useState(true);
@@ -42,7 +46,7 @@ export function useChatSessions(scope: string, defaultModel: string) {
     });
 
     return () => { cancelled = true; };
-  }, [scope]);
+  }, [scope, reloadToken]);
 
   /** 写入当前会话并落盘。标题为空时用第一条用户消息生成。 */
   const commit = useCallback((session: ChatSession) => {

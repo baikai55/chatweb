@@ -1,7 +1,7 @@
 import { joinURL } from "@/transport/chat-completions";
 import { isRecord, toTransportError, firstString } from "@/transport/errors";
 import { STORE_MODEL_CACHE, idbGet, idbPut } from "@/shared/db/idb";
-import type { Backend, ModelKind } from "@/backends/types";
+import type { Backend, BackendFlavor, ModelKind } from "@/backends/types";
 
 /**
  * 模型目录。
@@ -37,39 +37,56 @@ type CachedCatalog = {
   fetchedAt: number;
   /** 缓存时的地址。用户改了地址就得重拉，旧记录没这个字段也一样重拉 */
   baseURL?: string;
+  /** 从这次请求的响应头认出来的后端方言 */
+  flavor?: BackendFlavor;
   /** 只缓存从网络拿到的原始信息，saved / kind 这些依赖当前配置的字段每次重算 */
   rows: Array<{ id: string; ownedBy: string; displayName?: string; contextWindow?: number }>;
 };
 
-/** 缓存多久之内直接用，不打网络。用户可以手动刷新。 */
+/** 拉模型时白捡的东西：既有列表，也有响应头暴露的方言。 */
+export type ModelCatalog = {
+  models: CatalogModel[];
+  flavor: BackendFlavor;
+  fetchedAt: number;
+};
+
+/** 缓存多久之内算新鲜。只用来提示"这份可能过期了"，不再自动重拉。 */
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-/**
- * 读模型列表。默认走缓存，`force` 为真时强制刷新。
- *
- * 缓存的意义不只是省一次请求 —— CPA 的 /v1/models 加上两个富字段端点是三个请求，
- * 每次进页面都打一遍没必要，而且模型列表本来就不常变。
- */
-export async function fetchModels(
-  backend: Backend,
-  options: { force?: boolean; signal?: AbortSignal } = {},
-): Promise<CatalogModel[]> {
-  const cached = options.force ? undefined : await readCache(backend.id);
-  const fresh = cached
-    && cached.baseURL === backend.baseURL
-    && Date.now() - cached.fetchedAt < CACHE_TTL_MS;
-
-  const rows = fresh && cached ? cached.rows : await fetchFromNetwork(backend, options.signal);
-  if (!fresh) {
-    void writeCache({ backendId: backend.id, fetchedAt: Date.now(), baseURL: backend.baseURL, rows });
-  }
-  return decorate(rows, backend);
+export function isCatalogStale(fetchedAt: number): boolean {
+  return Date.now() - fetchedAt > CACHE_TTL_MS;
 }
 
-/** 只读缓存，不打网络。用于首屏快速渲染。 */
-export async function readCachedModels(backend: Backend): Promise<CatalogModel[] | null> {
+/**
+ * 读本地缓存的模型目录，**不打网络**。没有缓存时返回 null。
+ *
+ * 进页面不自动拉取是刻意的：所有出网请求都由用户点出来。
+ * 拉取用 `refreshModelCatalog()`，设置页有「获取模型」按钮。
+ */
+export async function readModelCatalog(backend: Backend): Promise<ModelCatalog | null> {
   const cached = await readCache(backend.id);
-  return cached ? decorate(cached.rows, backend) : null;
+  if (!cached || cached.baseURL !== backend.baseURL) return null;
+  return {
+    models: decorate(cached.rows, backend),
+    flavor: cached.flavor ?? backend.flavor,
+    fetchedAt: cached.fetchedAt,
+  };
+}
+
+/**
+ * 打网络拉模型目录并写缓存。
+ *
+ * 一次调用实际是三个请求（`/models` 加两个富字段端点），所以只在用户点
+ * 「获取模型」时才发 —— 模型列表本来也不常变。
+ */
+export async function refreshModelCatalog(
+  backend: Backend,
+  signal?: AbortSignal,
+): Promise<ModelCatalog> {
+  const { rows, flavor } = await fetchFromNetwork(backend, signal);
+  const fetchedAt = Date.now();
+  void writeCache({ backendId: backend.id, fetchedAt, baseURL: backend.baseURL, flavor, rows });
+  return { models: decorate(rows, backend), flavor, fetchedAt };
 }
 
 /**
@@ -77,7 +94,7 @@ export async function readCachedModels(backend: Backend): Promise<CatalogModel[]
  *
  * 勾选、改归类这些只影响标注，不影响网络数据。所以这些字段**不该进 query key**
  * —— 进了就等于每勾一下都算一个新查询，列表会整段换成 loading 再挂回来，
- * 滚动位置直接丢。改成拉取按 id + 地址缓存，标注在外面这一层重算。
+ * 滚动位置直接丢。标注在外面这一层重算。
  */
 export function applyBackendConfig(models: CatalogModel[], backend: Backend): CatalogModel[] {
   return decorate(models, backend);
@@ -95,7 +112,10 @@ export function sortForBrowsing(models: CatalogModel[]): CatalogModel[] {
   });
 }
 
-async function fetchFromNetwork(backend: Backend, signal?: AbortSignal): Promise<CachedCatalog["rows"]> {
+async function fetchFromNetwork(
+  backend: Backend,
+  signal?: AbortSignal,
+): Promise<{ rows: CachedCatalog["rows"]; flavor: BackendFlavor }> {
   const headers = new Headers({ Accept: "application/json" });
   if (backend.apiKey) headers.set("Authorization", `Bearer ${backend.apiKey}`);
 
@@ -104,11 +124,12 @@ async function fetchFromNetwork(backend: Backend, signal?: AbortSignal): Promise
     throw toTransportError(response, await response.text());
   }
 
+  const flavor = readFlavor(response.headers);
   const payload = await response.json();
   const raw = isRecord(payload) && Array.isArray(payload.data) ? payload.data : [];
   const enrichment = await fetchEnrichment(backend, signal);
 
-  return raw.flatMap((row) => {
+  const rows = raw.flatMap((row) => {
     if (!isRecord(row)) return [];
     const id = firstString(row.id);
     if (!id) return [];
@@ -120,6 +141,23 @@ async function fetchFromNetwork(backend: Backend, signal?: AbortSignal): Promise
       contextWindow: extra?.contextWindow,
     }];
   });
+
+  return { rows, flavor };
+}
+
+/**
+ * 后端方言识别。用响应头，不猜。
+ *
+ * CPA 把 X-CPA-* 全放进了 Access-Control-Expose-Headers，所以浏览器读得到；
+ * grok2api 只暴露 X-Request-ID。这两样都在 `/models` 的响应里，
+ * 所以识别方言不需要额外发请求 —— 拉模型时顺手读一下就有了。
+ */
+export function readFlavor(headers: Headers): BackendFlavor {
+  if (headers.get("X-CPA-Version") || headers.get("x-cpa-trace-id")) return "cpa";
+  // 兜底：有些部署可能不回版本头，看 expose 列表里有没有 X-CPA
+  if ((headers.get("Access-Control-Expose-Headers") ?? "").toLowerCase().includes("x-cpa")) return "cpa";
+  if (headers.get("X-Request-ID")) return "grok2api";
+  return "generic";
 }
 
 /** 把网络数据和当前后端配置（保存列表、归类覆盖）合成最终的展示模型。 */

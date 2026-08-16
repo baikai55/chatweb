@@ -67,12 +67,19 @@ export const backendSchema = z.object({
   /** direct 模式下浏览器直接持有；proxy 模式下留空，由 Worker 注入 */
   apiKey: z.string().default(""),
   mode: z.enum(BACKEND_MODES).default("direct"),
+  /** 拉模型列表时从响应头认出来的（见 model-catalog 的 readFlavor），不单独探测 */
   flavor: z.enum(BACKEND_FLAVORS).default("generic"),
   chatProtocol: z.enum(CHAT_PROTOCOLS).default("chat-completions"),
-  /** 探测结果，用户可在设置页手动覆盖 */
+  /**
+   * 决定侧边栏显示哪几个面板，用户自己勾。
+   *
+   * 以前是靠探测端点自动填的 —— 已经去掉了：那要对 5 个端点各发一次空请求，
+   * 有些站会把这种密集小请求判成测活直接封号。宁可多显示一个面板让用户点进去
+   * 看到真实报错，也不值得为此冒风险。
+   *
+   * 为空表示"不知道"，此时全部显示（老配置和导入的配置会走到这里）。
+   */
   capabilities: z.array(z.enum(CAPABILITIES)).default([]),
-  /** 上次探测时间戳，用来提示"探测结果可能过期了" */
-  probedAt: z.number().nullable().default(null),
   /** 手动覆盖某个模型的归类 */
   modelOverrides: z.record(z.string(), z.enum(MODEL_KINDS)).default({}),
   /**
@@ -125,7 +132,6 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     flavor: input.flavor ?? "generic",
     chatProtocol: input.chatProtocol ?? "chat-completions",
     capabilities: input.capabilities ?? [],
-    probedAt: input.probedAt ?? null,
     modelOverrides: input.modelOverrides ?? {},
     savedModels: input.savedModels ?? [],
     customImageRoutes: input.customImageRoutes ?? [],

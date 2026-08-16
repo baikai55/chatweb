@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Backend } from "@/backends/types";
 import type { CatalogModel } from "@/backends/model-catalog";
-import { streamChatCompletions, inferVendor } from "@/transport/chat-completions";
+import { streamChatCompletions, inferVendor, webSearchSupport } from "@/transport/chat-completions";
 import { isAbortError } from "@/transport/errors";
 import type { ChatStreamSnapshot, ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
@@ -49,8 +49,7 @@ export function ChatPanel({
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
-  const vendor = inferVendor(model);
-  const supportsSearch = vendor === "gemini" || vendor === "grok";
+  const search = webSearchSupport(model);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -172,23 +171,31 @@ export function ChatPanel({
           </Select>
         ) : null}
 
-        {supportsSearch ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn("size-8 rounded-full", session.webSearch && "bg-accent text-foreground")}
-                onClick={() => onCommit({ ...session, webSearch: !session.webSearch })}
-              >
-                <Globe className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              联网搜索{vendor === "gemini" ? "" : "（仅部分模型支持）"}
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
+        {/*
+          不支持时禁用而不是隐藏 —— 之前是隐藏，模型 id 里没写 gemini / grok
+          就整个按钮凭空消失，用户只会以为功能丢了。禁用 + tooltip 说清原因。
+        */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={!search.supported}
+              className={cn(
+                "size-8 rounded-full",
+                session.webSearch && search.supported && "bg-accent text-foreground",
+              )}
+              aria-label="联网搜索"
+              aria-pressed={session.webSearch && search.supported}
+              onClick={() => onCommit({ ...session, webSearch: !session.webSearch })}
+            >
+              <Globe className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {search.supported ? `联网搜索 · ${search.reason}` : `联网搜索不可用 · ${search.reason}`}
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       <MessageScrollerProvider>

@@ -16,6 +16,9 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelPicker } from "@/features/console/model-picker";
+import { GenerationHistory } from "@/features/history/generation-history";
+import { hydrateAssets, toAsset, type GenerationRecord } from "@/features/history/generation-store";
+import { useGenerationHistory } from "@/features/history/use-generation-history";
 import {
   generateImages,
   type ImageResponseFormat,
@@ -83,6 +86,25 @@ export function ImagePanel({
   const abortRef = useRef<AbortController | null>(null);
   const settings = useAppSettings();
 
+  const history = useGenerationHistory(backend.id, "image");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
+  // 打开历史记录时造的对象 URL 要释放，换一条或卸载时调
+  const releaseRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => releaseRef.current?.(), []);
+
+  function showRecord(record: GenerationRecord): void {
+    releaseRef.current?.();
+    const { urls, release } = hydrateAssets(record);
+    releaseRef.current = release;
+    setImages(urls.map((item) => ({ url: item.url, revisedPrompt: item.note })));
+    setActiveRecordId(record.id);
+    setError("");
+    setPrompt(record.title);
+    setHistoryOpen(false);
+  }
+
   const model = imageModels.some((item) => item.id === selectedModel)
     ? selectedModel
     : imageModels[0]?.id ?? "";
@@ -115,6 +137,9 @@ export function ImagePanel({
     setPending(true);
     setError("");
     setImages([]);
+    releaseRef.current?.();
+    releaseRef.current = null;
+    setActiveRecordId(null);
     if (settings.clearInputAfterSubmit) setPrompt("");
 
     try {
@@ -131,6 +156,18 @@ export function ImagePanel({
       });
       setImages(result);
       notifyTaskDone("图片生成完成", `${result.length} 张 · ${model}`);
+
+      const assets = await Promise.all(result.map((image) => toAsset(image.url, image.revisedPrompt)));
+      const saved = history.record({
+        model,
+        title: text,
+        assets,
+        params: {
+          count, size, aspectRatio, quality, responseFormat,
+          dimensionMode: effectiveDimension,
+        },
+      });
+      setActiveRecordId(saved.id);
     } catch (caught) {
       if (!isAbortError(caught)) {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -166,6 +203,20 @@ export function ImagePanel({
           disabled={pending}
         />
       </div>
+
+      <GenerationHistory
+        records={history.records}
+        activeId={activeRecordId}
+        open={historyOpen}
+        onToggle={() => setHistoryOpen((value) => !value)}
+        onOpen={showRecord}
+        onDelete={(id) => {
+          history.remove(id);
+          if (id === activeRecordId) setActiveRecordId(null);
+        }}
+        onClear={() => { history.clear(); setActiveRecordId(null); }}
+        emptyHint="生成过的图片会存在这里，刷新也不丢。"
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto" aria-busy={pending}>
         <div className="mx-auto flex min-h-full max-w-5xl flex-col px-3 py-4 sm:px-5">

@@ -17,6 +17,9 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelPicker } from "@/features/console/model-picker";
+import { GenerationHistory } from "@/features/history/generation-history";
+import { hydrateAssets, type GenerationRecord } from "@/features/history/generation-store";
+import { useGenerationHistory } from "@/features/history/use-generation-history";
 import { cn } from "@/shared/lib/cn";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
@@ -87,6 +90,43 @@ export function VideoPanel({
   const abortRef = useRef<AbortController | null>(null);
   const runSequenceRef = useRef(0);
   const settings = useAppSettings();
+
+  const history = useGenerationHistory(backend.id, "video");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
+  const releaseRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => releaseRef.current?.(), []);
+
+  /**
+   * 点回一条历史：伪造一个 done 状态塞进 run，复用现成的结果渲染。
+   * 视频结果一律是远程 URL，`hydrateAssets` 这里其实不会造对象 URL，
+   * 但还是走同一条路 —— 免得以后改成存字节时漏掉释放。
+   */
+  function showRecord(item: GenerationRecord) {
+    releaseRef.current?.();
+    const { urls, release } = hydrateAssets(item);
+    releaseRef.current = release;
+    const url = urls[0]?.url;
+    if (!url) return;
+    abortRef.current?.abort();
+    runSequenceRef.current += 1;
+    setRun({
+      phase: "done",
+      requestId: "",
+      status: {
+        requestId: "",
+        status: "done",
+        model: item.model,
+        progress: 100,
+        video: { url },
+      },
+    });
+    setActiveRecordId(item.id);
+    setFormError("");
+    setPrompt(item.title);
+    setHistoryOpen(false);
+  }
 
   const busy = run.phase === "uploading" || run.phase === "submitting" || run.phase === "polling";
   const canSubmit = Boolean(prompt.trim() && model && (operation === "generate" || sourceFile));
@@ -206,7 +246,11 @@ export function VideoPanel({
             });
 
       update(runStateFromStatus(job.status, job.requestId));
-      if (job.status.status !== "pending") return;
+      // 少数后端直接同步返回结果，不给任务 ID —— 这条路也要存历史
+      if (job.status.status !== "pending") {
+        finish(job.status, text, sequence);
+        return;
+      }
       if (!job.requestId) throw new Error("上游没有返回可轮询的视频任务 ID");
 
       const finalStatus = await pollVideoGeneration({
@@ -218,9 +262,7 @@ export function VideoPanel({
         signal: controller.signal,
       });
       update(runStateFromStatus(finalStatus, job.requestId));
-      if (finalStatus.status === "done") {
-        notifyTaskDone("视频生成完成", `${operationLabel(operation)} · ${model}`);
-      }
+      finish(finalStatus, text, sequence);
     } catch (caught) {
       if (controller.signal.aborted || isAbortError(caught)) {
         update((current) => ({ ...current, phase: "cancelled", error: undefined }));
@@ -234,6 +276,20 @@ export function VideoPanel({
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
     }
+  }
+
+  /** 任务落地后的收尾：通知 + 存历史。同步返回和轮询结束两条路都走这里。 */
+  function finish(status: VideoGenerationStatus, text: string, sequence: number): void {
+    if (status.status !== "done") return;
+    notifyTaskDone("视频生成完成", `${operationLabel(operation)} · ${model}`);
+    if (!status.video?.url) return;
+    const saved = history.record({
+      model,
+      title: text,
+      assets: [{ url: status.video.url }],
+      params: { operation, duration, aspectRatio, resolution, extendDuration },
+    });
+    if (runSequenceRef.current === sequence) setActiveRecordId(saved.id);
   }
 
   return (
@@ -258,6 +314,20 @@ export function VideoPanel({
           <CompactSelect label="延长时长" value={extendDuration} options={EXTEND_DURATIONS} onChange={setExtendDuration} disabled={busy} />
         ) : null}
       </div>
+
+      <GenerationHistory
+        records={history.records}
+        activeId={activeRecordId}
+        open={historyOpen}
+        onToggle={() => setHistoryOpen((value) => !value)}
+        onOpen={showRecord}
+        onDelete={(id) => {
+          history.remove(id);
+          if (id === activeRecordId) setActiveRecordId(null);
+        }}
+        onClear={() => { history.clear(); setActiveRecordId(null); }}
+        emptyHint="生成过的视频会存在这里。存的是上游链接，链接本身可能会过期。"
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-3 py-6 sm:px-6">

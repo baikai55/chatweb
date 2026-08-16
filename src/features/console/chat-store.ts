@@ -1,4 +1,4 @@
-import { STORE_SESSIONS, idbDelete, idbGetByScope, idbPut } from "@/shared/db/idb";
+import { STORE_SESSIONS, idbClear, idbDelete, idbGetByScope, idbPut } from "@/shared/db/idb";
 import type { ChatMessage, ChatToolActivity, ReasoningEffort } from "@/transport/types";
 
 /**
@@ -93,6 +93,11 @@ export async function deleteSession(id: string): Promise<void> {
   } catch {
     // 忽略
   }
+}
+
+/** 清掉全部会话，不分后端。设置页的「删除全部记录」用。 */
+export async function clearAllSessions(): Promise<void> {
+  await idbClear(STORE_SESSIONS);
 }
 
 /** 超出上限时清理最旧的。在保存后异步调用即可，不用等它。 */

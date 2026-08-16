@@ -93,6 +93,27 @@ function buildTools(options: ChatCompletionsOptions): Array<Record<string, unkno
   return [];
 }
 
+/**
+ * 这个模型能不能用联网搜索，不能的话为什么。
+ *
+ * UI 拿它决定按钮是可点还是禁用 —— **不要用它决定按钮显不显示**。
+ * 之前是「不支持就整个隐藏」，结果模型 id 里没写 gemini / grok 的时候
+ * 按钮凭空消失，用户只会以为功能没了。禁用 + 说明原因才讲得通。
+ */
+export function webSearchSupport(model: string): { supported: boolean; reason: string } {
+  if (!model) return { supported: false, reason: "先选一个模型" };
+  const vendor = inferVendor(model);
+  if (vendor === "gemini") return { supported: true, reason: "走 Gemini 原生 google_search" };
+  if (vendor === "grok") return { supported: true, reason: "走 web_search 工具" };
+  if (vendor === "claude") {
+    return {
+      supported: false,
+      reason: "Claude 经 chat/completions 会把搜索工具静默丢弃，得走 /v1/messages（还没做）",
+    };
+  }
+  return { supported: false, reason: `${model} 经 chat/completions 用不了内置搜索` };
+}
+
 export function inferVendor(model: string): string {
   const id = model.toLowerCase();
   if (id.includes("gemini") || id.includes("imagen")) return "gemini";

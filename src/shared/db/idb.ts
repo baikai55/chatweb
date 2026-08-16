@@ -13,10 +13,12 @@
  */
 
 const DB_NAME = "chatweb";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORE_SESSIONS = "sessions";
 export const STORE_MODEL_CACHE = "modelCache";
+/** 生图 / 视频 / 语音的产物记录 */
+export const STORE_GENERATIONS = "generations";
 
 let connection: Promise<IDBDatabase> | null = null;
 
@@ -40,6 +42,11 @@ function open(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_MODEL_CACHE)) {
         db.createObjectStore(STORE_MODEL_CACHE, { keyPath: "backendId" });
+      }
+      if (!db.objectStoreNames.contains(STORE_GENERATIONS)) {
+        const store = db.createObjectStore(STORE_GENERATIONS, { keyPath: "id" });
+        // 侧栏按「当前后端 + 当前面板」列，所以 kind 也进索引
+        store.createIndex("byScopeKind", ["scope", "kind", "createdAt"]);
       }
     };
 
@@ -106,6 +113,35 @@ export function idbGetByScope<T>(storeName: string, indexName: string, scope: st
         request.onerror = () => reject(request.error ?? new Error("读取失败"));
       }),
   );
+}
+
+/**
+ * 复合索引的前缀范围查询，尾段取全域。
+ *
+ * `idbGetByScope` 是它的两段特例；三段索引（[scope, kind, createdAt]）用这个。
+ * 尾段用 -Infinity / Infinity 兜住 —— 索引里的尾段都是时间戳。
+ */
+export function idbGetByPrefix<T>(
+  storeName: string,
+  indexName: string,
+  prefix: IDBValidKey[],
+): Promise<T[]> {
+  return open().then(
+    (db) =>
+      new Promise<T[]>((resolve, reject) => {
+        const transaction = db.transaction(storeName, "readonly");
+        const index = transaction.objectStore(storeName).index(indexName);
+        const range = IDBKeyRange.bound([...prefix, -Infinity], [...prefix, Infinity]);
+        const request = index.getAll(range);
+        request.onsuccess = () => resolve(request.result as T[]);
+        request.onerror = () => reject(request.error ?? new Error("读取失败"));
+      }),
+  );
+}
+
+/** 清空一整个 store。设置页的「删除全部记录」用。 */
+export function idbClear(storeName: string): Promise<undefined> {
+  return runTransaction(storeName, "readwrite", (store) => store.clear());
 }
 
 /** 估算已用配额，用来在设置里显示"占用了多少空间"。 */

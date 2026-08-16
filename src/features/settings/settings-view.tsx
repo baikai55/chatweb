@@ -1,9 +1,7 @@
-import { Check, Copy, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { Check, Copy, Download, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { probeBackend } from "@/backends/capability-probe";
 import { classifyModel, sortForBrowsing, type CatalogModel } from "@/backends/model-catalog";
 import {
   CAPABILITIES,
@@ -20,6 +18,9 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { clearAllSessions } from "@/features/console/chat-store";
+import { clearAllGenerations } from "@/features/history/generation-store";
+import { estimateUsage } from "@/shared/db/idb";
 import { cn } from "@/shared/lib/cn";
 import {
   patchAppSettings,
@@ -69,18 +70,24 @@ export type ModelDraft = {
 };
 
 export function SettingsView({
-  backend, models, loading, error, onRefresh, onPatch, onRemove, onAdd, draft, onDraftChange,
+  backend, models, fetchedAt, stale, loading, error, onFetchModels, onPatch, onRemove, onAdd, draft, onDraftChange,
+  onDataCleared,
 }: {
   backend: Backend;
   models: CatalogModel[];
+  /** 本地这份目录是什么时候拉的；null 表示还没拉过 */
+  fetchedAt: number | null;
+  stale: boolean;
   loading: boolean;
   error: string;
-  onRefresh: () => void;
+  onFetchModels: () => void;
   onPatch: (changes: Partial<Backend>) => void;
   onRemove: () => void;
   onAdd: () => void;
   draft: ModelDraft | null;
   onDraftChange: (draft: ModelDraft | null) => void;
+  /** 删完记录后让上层把内存里的列表也刷掉 */
+  onDataCleared: () => void;
 }) {
   return (
     <div className="mx-auto flex h-full max-w-2xl flex-col gap-3 p-4">
@@ -98,7 +105,7 @@ export function SettingsView({
         <TabsContent value="models" className="flex min-h-0 flex-1 flex-col">
           <ModelSection
             backend={backend} models={models} loading={loading} error={error}
-            onRefresh={onRefresh} onPatch={onPatch}
+            fetchedAt={fetchedAt} stale={stale} onFetchModels={onFetchModels} onPatch={onPatch}
             draft={draft} onDraftChange={onDraftChange}
           />
         </TabsContent>
@@ -106,7 +113,10 @@ export function SettingsView({
           <RouteSection backend={backend} onPatch={onPatch} />
         </TabsContent>
         <TabsContent value="behavior" className="min-h-0 flex-1 overflow-y-auto">
-          <BehaviorSection />
+          <div className="flex flex-col gap-3">
+            <BehaviorSection />
+            <DataSection onCleared={onDataCleared} />
+          </div>
         </TabsContent>
       </Tabs>
     </div>
@@ -131,16 +141,6 @@ function BackendSection({
   const dirty = name.trim() !== backend.name
     || normalized !== backend.baseURL
     || apiKey !== backend.apiKey;
-
-  const probe = useMutation({
-    mutationFn: () => probeBackend(backend.baseURL),
-    onSuccess: (result) => {
-      onPatch({ capabilities: result.capabilities, flavor: result.flavor, probedAt: Date.now() });
-      if (result.suspicious) toast.warning("每个端点都返回 200，八成是 catch-all 兜底，下面自己勾一下");
-      else toast.success(`探到 ${result.capabilities.length} 项能力`);
-    },
-    onError: () => toast.error("探测失败，检查地址是否可达"),
-  });
 
   function save(): void {
     if (!normalized) {
@@ -206,20 +206,12 @@ function BackendSection({
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-medium">能力</h2>
-          <Button
-            variant="ghost" size="sm" className="ml-auto h-8 gap-1 px-2 text-xs"
-            disabled={probe.isPending || dirty} onClick={() => probe.mutate()}
-          >
-            {probe.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-            重新探测
-          </Button>
-        </div>
+        <h2 className="text-sm font-medium">显示哪些面板</h2>
 
         <div className="mt-3 flex flex-wrap gap-1.5">
           {CAPABILITIES.map((capability) => {
-            const on = backend.capabilities.includes(capability);
+            // 一个都没勾时全部显示，所以视觉上也全部点亮
+            const on = backend.capabilities.length === 0 || backend.capabilities.includes(capability);
             return (
               <button
                 key={capability}
@@ -238,11 +230,10 @@ function BackendSection({
         </div>
 
         <p className="mt-3 text-xs text-muted-foreground">
-          决定侧边栏显示哪几个面板。探测靠的是「404 就是没这个路由」，
-          会对 5 个端点各发一次空请求 —— <strong className="font-medium">别反复点</strong>，
-          密集的小请求会被上游当成测活。探错了直接在上面手动勾。
-          {dirty ? " 上面的改动还没保存，先保存再探。" : ""}
-          {backend.probedAt ? ` 上次探测：${new Date(backend.probedAt).toLocaleString()}。` : ""}
+          自己勾，一个都没勾时全部显示。
+          以前这里是自动探测的 —— <strong className="font-medium">去掉了</strong>：
+          那要对 5 个端点各发一次空请求，有些站会把这种密集小请求判成测活直接封号。
+          宁可多显示一个面板、点进去看到真实报错，也不值得为此冒风险。
         </p>
       </section>
     </div>
@@ -252,13 +243,15 @@ function BackendSection({
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 
 function ModelSection({
-  backend, models, loading, error, onRefresh, onPatch, draft, onDraftChange,
+  backend, models, loading, error, fetchedAt, stale, onFetchModels, onPatch, draft, onDraftChange,
 }: {
   backend: Backend;
   models: CatalogModel[];
   loading: boolean;
   error: string;
-  onRefresh: () => void;
+  fetchedAt: number | null;
+  stale: boolean;
+  onFetchModels: () => void;
   onPatch: (changes: Partial<Backend>) => void;
   draft: ModelDraft | null;
   onDraftChange: (draft: ModelDraft | null) => void;
@@ -329,17 +322,25 @@ function ModelSection({
         <span className="text-xs text-muted-foreground">
           {dirty ? `已勾 ${checkedCount} / ${models.length}` : `已保存 ${checkedCount} / ${models.length}`}
         </span>
-        <Button variant="ghost" size="icon" className="ml-auto size-8" onClick={onRefresh} disabled={loading} aria-label="刷新模型列表">
-          <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+        <Button
+          variant="ghost" size="sm" className="ml-auto h-8 shrink-0 gap-1 px-2 text-xs"
+          onClick={onFetchModels} disabled={loading}
+        >
+          {loading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+          {models.length === 0 ? "获取模型" : "重新获取"}
         </Button>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-10"><Loader2 className="size-4 animate-spin" /></div>
-      ) : error ? (
-        <p className="whitespace-pre-wrap p-4 text-xs text-destructive">{error}</p>
-      ) : models.length === 0 ? (
-        <p className="p-4 text-xs text-muted-foreground">没有拉到模型，检查密钥是否有效。</p>
+      {error ? (
+        <p className="whitespace-pre-wrap border-b p-3 text-xs text-destructive">{error}</p>
+      ) : null}
+
+      {models.length === 0 ? (
+        <div className="p-4 text-xs text-muted-foreground">
+          {loading
+            ? "正在拉模型列表…"
+            : "还没拉过模型列表。点右上角「获取模型」。所有出网请求都由你点出来 —— 进页面不会自动请求后端。"}
+        </div>
       ) : (
         <>
           <div className="border-b p-2">
@@ -407,7 +408,11 @@ function ModelSection({
 
           <div className="flex items-center gap-2 border-t p-3">
             <p className="min-w-0 flex-1 text-xs text-muted-foreground">
-              {dirty ? "改动还没生效，点保存。" : "勾好后点保存。聊天时的模型选择器只显示保存过的。"}
+              {dirty
+                ? "改动还没生效，点保存。"
+                : fetchedAt
+                  ? `勾好后点保存。列表拉取于 ${new Date(fetchedAt).toLocaleString()}${stale ? "，可能过期了" : ""}。`
+                  : "勾好后点保存。聊天时的模型选择器只显示保存过的。"}
             </p>
             {dirty ? (
               <Button variant="ghost" size="sm" className="h-8 shrink-0 text-xs" onClick={() => onDraftChange(null)}>
@@ -707,6 +712,80 @@ function BehaviorSection() {
       />
     </section>
   );
+}
+
+/* ── 本地数据 ─────────────────────────────────────────────────────── */
+
+function DataSection({ onCleared }: { onCleared: () => void }) {
+  const [usage, setUsage] = useState<{ usage: number; quota: number } | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void estimateUsage().then((result) => { if (!cancelled) setUsage(result); });
+    return () => { cancelled = true; };
+  }, [busy]);
+
+  async function clearAll(): Promise<void> {
+    setBusy(true);
+    try {
+      // 只清记录，不动后端配置和模型缓存 —— 删了配置用户就得重新填地址和密钥
+      await Promise.all([clearAllSessions(), clearAllGenerations()]);
+      onCleared();
+      setConfirming(false);
+      toast.success("已删除全部记录");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border p-4">
+      <h2 className="text-sm font-medium">本地数据</h2>
+
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <span className="text-sm">删除全部记录</span>
+        {confirming ? (
+          <div className="flex shrink-0 gap-2">
+            <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setConfirming(false)} disabled={busy}>
+              取消
+            </Button>
+            <Button
+              size="sm" className="h-8 gap-1 text-xs" onClick={() => { void clearAll(); }} disabled={busy}
+            >
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              确认删除
+            </Button>
+          </div>
+        ) : (
+          <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={() => setConfirming(true)}>
+            <Trash2 className="size-3.5" />删除
+          </Button>
+        )}
+      </div>
+
+      <p className="mt-1 text-xs text-muted-foreground">
+        清掉<strong className="font-medium">全部后端</strong>的对话历史和生图/视频/语音记录，删了拿不回来。
+        后端配置、密钥和模型列表不动 —— 那些删了得重新填一遍。
+        {usage ? ` 当前本地占用约 ${formatBytes(usage.usage)}。` : ""}
+      </p>
+    </section>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[index]}`;
 }
 
 /* ── 小部件 ───────────────────────────────────────────────────────── */

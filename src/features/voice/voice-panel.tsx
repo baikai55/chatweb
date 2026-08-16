@@ -19,6 +19,9 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { GenerationHistory } from "@/features/history/generation-history";
+import { hydrateAssets, toAsset, type GenerationRecord } from "@/features/history/generation-store";
+import { useGenerationHistory } from "@/features/history/use-generation-history";
 import { isAbortError } from "@/transport/errors";
 import {
   listVoices,
@@ -103,6 +106,42 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     setTTSResult(next);
   }, []);
 
+  const history = useGenerationHistory(backend.id, "voice");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
+
+  /**
+   * 点回一条历史。TTS 那条要把存下来的字节重新造成对象 URL ——
+   * 交给 `replaceAudioResult` 管生命周期，它本来就负责 revoke 上一条。
+   */
+  function showRecord(item: GenerationRecord) {
+    setError("");
+    setHistoryOpen(false);
+    setActiveRecordId(item.id);
+
+    if (item.text !== undefined) {
+      setMode("stt");
+      replaceAudioResult(null);
+      setSTTResult({ text: item.text });
+      setStatus(`历史记录 · ${new Date(item.createdAt).toLocaleString()}`);
+      return;
+    }
+
+    const { urls } = hydrateAssets(item);
+    const first = urls[0];
+    if (!first) return;
+    setMode("tts");
+    setSTTResult(null);
+    setText(item.title);
+    // source: "binary" 让 releaseSpeechAudio 认得这是需要 revoke 的对象 URL
+    replaceAudioResult({
+      url: first.url,
+      contentType: first.contentType ?? "audio/mpeg",
+      source: "binary",
+    });
+    setStatus(`历史记录 · ${new Date(item.createdAt).toLocaleString()}`);
+  }
+
   useEffect(() => {
     if (!ttsModels.some((model) => model.id === ttsModel)) setTTSModel(ttsModels[0]?.id ?? "");
   }, [ttsModel, ttsModels]);
@@ -173,8 +212,8 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
   if (!hasTTS && !hasSTT) {
     return (
       <CapabilityGuide
-        title="没有探测到语音能力"
-        detail="重新探测后端能力，或确认 grok2api 已启用 /tts 与 /stt。"
+        title="语音面板被关掉了"
+        detail="去设置页的「显示哪些面板」里勾上语音合成或语音转写。"
         onManage={onManage}
       />
     );
@@ -230,6 +269,19 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
       });
       replaceAudioResult(result);
       setStatus("语音已生成");
+
+      // blob: URL 一刷新就失效，所以历史里必须存字节，读回来再造新的对象 URL
+      const asset = await toAsset(result.url);
+      const saved = history.record({
+        model: ttsModel,
+        title: prompt,
+        assets: [{ ...asset, contentType: asset.contentType ?? result.contentType }],
+        params: {
+          mode: "tts", voiceId: selectedVoice, language: selectedLanguage,
+          speed: parsedSpeed, outputFormat, withTimestamps,
+        },
+      });
+      setActiveRecordId(saved.id);
     } catch (caught) {
       if (isAbortError(caught)) setStatus("已取消语音合成");
       else {
@@ -267,6 +319,16 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
       });
       setSTTResult(result);
       setStatus("转写完成");
+
+      const saved = history.record({
+        model: sttModel,
+        // 转写没有提示词，用文件名当标题，正文存转写结果
+        title: audioFile.name,
+        assets: [],
+        text: result.text,
+        params: { mode: "stt", language: sttLanguage },
+      });
+      setActiveRecordId(saved.id);
     } catch (caught) {
       if (isAbortError(caught)) setStatus("已取消语音识别");
       else {
@@ -300,9 +362,23 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
           </TabsList>
         </Tabs>
         {!knownCapabilities ? (
-          <span className="ml-auto text-xs text-muted-foreground">能力未确认，可直接尝试</span>
+          <span className="ml-auto text-xs text-muted-foreground">没勾过面板，两个都放出来了</span>
         ) : null}
       </div>
+
+      <GenerationHistory
+        records={history.records}
+        activeId={activeRecordId}
+        open={historyOpen}
+        onToggle={() => setHistoryOpen((value) => !value)}
+        onOpen={showRecord}
+        onDelete={(id) => {
+          history.remove(id);
+          if (id === activeRecordId) setActiveRecordId(null);
+        }}
+        onClear={() => { history.clear(); setActiveRecordId(null); }}
+        emptyHint="合成过的语音和转写结果会存在这里。语音存的是音频字节，刷新也能放。"
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4 pb-8">

@@ -21,11 +21,11 @@ const MODES: Array<{ mode: ConsoleMode; label: string; icon: typeof MessageSquar
 /**
  * 按后端实际能力过滤模式。
  *
- * 这是"多后端切换"最直接的体现：连 CPA 时语音会消失（实测它没有 /v1/tts 和 /v1/stt，
- * 返回 404），连 grok2api 时才出现。
+ * 这是"多后端切换"最直接的体现：勾掉语音后它就从侧栏消失
+ * （实测 CPA 没有 /v1/tts 和 /v1/stt，返回 404）。
  *
- * 探测失败（capabilities 为空）时全部显示 —— 宁可让用户点进去看到错误，
- * 也别因为探测不准把功能藏了。
+ * capabilities 为空表示用户没勾过，此时全部显示 —— 宁可让用户点进去看到
+ * 真实报错，也别把功能藏了。这个字段以前是探测端点自动填的，现在只由用户勾。
  */
 export function availableModes(backend: Backend): ConsoleMode[] {
   if (backend.capabilities.length === 0) return MODES.map((item) => item.mode);
