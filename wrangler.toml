@@ -4,6 +4,13 @@ compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
+# 部署前先产出 dist/。
+# dist/ 不进仓库，所以 Cloudflare 的 Workers Builds 克隆下来是没有它的；
+# 而它默认的部署命令就是 `npx wrangler deploy`，不会自己跑构建。
+# 把构建挂在这里，本地 `wrangler deploy` 和 CF 云端构建就都能拿到 dist/。
+[build]
+command = "pnpm build"
+
 # 静态 SPA。dist 由 `pnpm build` 产出。
 # not_found_handling 让所有未命中路径回落到 index.html（前端自己路由）。
 [assets]

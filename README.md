@@ -88,6 +88,11 @@ wrangler secret put TOKEN_SECRET       # openssl rand -hex 32
 pnpm deploy
 ```
 
+`dist/` 不进仓库，构建挂在 `wrangler.toml` 的 `[build]` 钩子上，
+所以 `wrangler deploy` 会自己先跑 `pnpm build`。接 Cloudflare Workers Builds
+（Git 自动部署）时也因此不用在面板里额外配置构建命令 —— 它默认执行的
+`npx wrangler deploy` 会连带触发构建。
+
 建议给 R2 桶配一条 lifecycle rule 自动清理 7 天前的对象。
 
 ## 已知的坑（都已在代码里处理）
