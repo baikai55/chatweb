@@ -1,0 +1,39 @@
+name = "chatweb"
+main = "worker/index.ts"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# 静态 SPA。dist 由 `pnpm build` 产出。
+# not_found_handling 让所有未命中路径回落到 index.html（前端自己路由）。
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# 用户上传的图片/视频。视频编辑与延长需要一个公网可达的源文件 URL，
+# 而 grok2api 的上传端点是 admin-only，所以自建这条通道。
+# 建议给这个 bucket 配一条 lifecycle rule，自动删除 7 天前的对象。
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "chatweb"
+
+[vars]
+# —— 服务端密钥模式（可选）——
+# 填了 UPSTREAM_BASE_URL 之后，前端会显示「使用预置后端」，
+# 访问者输入 ACCESS_PASSWORD 即可使用，全程接触不到真正的 API key。
+# 留空则只有浏览器直连模式。
+UPSTREAM_BASE_URL = ""
+UPSTREAM_NAME = ""
+# 逗号分隔，覆盖自动探测结果。留空则由前端探测。
+# 可选值: chat,image,video,tts,stt
+UPSTREAM_CAPABILITIES = ""
+
+# —— 上传限制 ——
+MAX_UPLOAD_BYTES = "104857600"
+MEDIA_CACHE_SECONDS = "604800"
+
+# —— 需要用 `wrangler secret put` 设置的，不要写在这里 ——
+#   UPSTREAM_API_KEY   服务端持有的上游 key
+#   ACCESS_PASSWORD    访问口令
+#   TOKEN_SECRET       签发访问 token 用的 HMAC 密钥（随便一串长随机字符）
