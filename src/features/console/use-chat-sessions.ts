@@ -55,6 +55,14 @@ export function useChatSessions(scope: string, defaultModel: string, reloadToken
       : session;
     setCurrent(titled);
     setSessions((previous) => upsertSession(previous, titled).filter((item) => item.messages.length > 0));
+
+    // 逐条删消息删到一条不剩时，库里那条也得删掉 —— `saveSession` 对空会话是
+    // 直接 return（本来是为了不给空壳落盘），光靠它的话旧记录还躺在 IndexedDB 里，
+    // 一刷新整段对话就复活了。
+    if (titled.messages.length === 0) {
+      void deleteSession(titled.id);
+      return;
+    }
     void saveSession(titled).then(() => pruneSessions(scope));
   }, [scope]);
 

@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Globe, Loader2, Square, TriangleAlert, Wrench } from "lucide-react";
+import { ArrowUp, BrainCircuit, Globe, Loader2, Square, Trash2, TriangleAlert, Wrench } from "lucide-react";
 import { useCallback, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Backend } from "@/backends/types";
 import type { CatalogModel } from "@/backends/model-catalog";
-import { streamChatCompletions, inferVendor, webSearchSupport } from "@/transport/chat-completions";
+import { streamChatCompletions, inferVendor, webSearchNote } from "@/transport/chat-completions";
 import { isAbortError } from "@/transport/errors";
 import type { ChatStreamSnapshot, ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
@@ -49,7 +49,7 @@ export function ChatPanel({
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
-  const search = webSearchSupport(model);
+  const search = webSearchNote(model);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -128,6 +128,22 @@ export function ChatPanel({
     void send([...base.messages, userMessage], base);
   }
 
+  /**
+   * 删掉一条消息。只删这一条，不连带删它的问/答 ——
+   * 想删整轮就点两下，比"我以为只删一条结果少了两条"强。
+   *
+   * 注意删完可能出现两条同角色相邻（删掉中间那条 user 之后 assistant 挨着
+   * assistant），有些上游要求严格交替会因此报 400。这是用户自己剪的，
+   * 报错也指得回来，所以不在这里替他挡。
+   */
+  function deleteMessage(id: string) {
+    onCommit({
+      ...session,
+      messages: session.messages.filter((message) => message.id !== id),
+      updatedAt: Date.now(),
+    });
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     // 具体哪个键发送看设置页；输入法组合中的回车一律不拦（中文输入按回车是选词）。
     if (shouldSubmitOnKey(event, settings.submitMode)) {
@@ -154,48 +170,38 @@ export function ChatPanel({
           onManage={onManage}
         />
 
-        {activeModel?.reasoning ? (
-          <Select
-            value={session.reasoningEffort}
-            onValueChange={(value) => onCommit({ ...session, reasoningEffort: value as ReasoningEffort })}
-          >
-            <SelectTrigger className="h-8 w-auto gap-1 rounded-full border-0 bg-transparent px-2.5 text-xs shadow-none">
-              <BrainCircuit className="size-3.5" />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {REASONING_LEVELS.map((level) => (
-                <SelectItem key={level} value={level} className="text-xs">{level}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : null}
-
         {/*
-          不支持时禁用而不是隐藏 —— 之前是隐藏，模型 id 里没写 gemini / grok
-          就整个按钮凭空消失，用户只会以为功能丢了。禁用 + tooltip 说清原因。
+          推理档位和联网搜索都不再按模型能力上锁 —— 判定是拿模型 id 猜的
+          （`isReasoningModel` / `inferVendor` 都只是子串匹配），猜错就把能用的
+          功能锁死了，而且用户根本看不出是"锁了"还是"没这功能"。
+          两个控件的默认值都是不发（`auto` / 关），真发出去一定是用户点过的。
+          上游不认就让它报错，报错至少指得回来。
         */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              disabled={!search.supported}
-              className={cn(
-                "size-8 rounded-full",
-                session.webSearch && search.supported && "bg-accent text-foreground",
-              )}
-              aria-label="联网搜索"
-              aria-pressed={session.webSearch && search.supported}
-              onClick={() => onCommit({ ...session, webSearch: !session.webSearch })}
-            >
-              <Globe className="size-3.5" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            {search.supported ? `联网搜索 · ${search.reason}` : `联网搜索不可用 · ${search.reason}`}
-          </TooltipContent>
-        </Tooltip>
+        <Select
+          value={session.reasoningEffort}
+          onValueChange={(value) => onCommit({ ...session, reasoningEffort: value as ReasoningEffort })}
+        >
+          <SelectTrigger
+            className={cn(
+              "h-8 w-auto gap-1 rounded-full border-0 bg-transparent px-2.5 text-xs shadow-none",
+              !activeModel?.reasoning && "text-muted-foreground",
+            )}
+          >
+            <BrainCircuit className="size-3.5" />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {REASONING_LEVELS.map((level) => (
+              <SelectItem key={level} value={level} className="text-xs">{level}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <WebSearchToggle
+          enabled={session.webSearch}
+          note={search}
+          onToggle={() => onCommit({ ...session, webSearch: !session.webSearch })}
+        />
       </div>
 
       <MessageScrollerProvider>
@@ -208,7 +214,16 @@ export function ChatPanel({
 
               {rendered.map(({ message, html }) => (
                 <MessageScrollerItem key={message.id}>
-                  <ChatBubble message={message} html={html} />
+                  <ChatBubble
+                    message={message}
+                    html={html}
+                    /*
+                      流式过程中不给删 —— `send()` 里捏着一份发请求那一刻的
+                      messages，结束时会用它拼上回复整个覆盖回去，
+                      这中间删掉的消息会原样长回来。
+                    */
+                    onDelete={streaming ? undefined : () => deleteMessage(message.id)}
+                  />
                 </MessageScrollerItem>
               ))}
 
@@ -256,6 +271,53 @@ export function ChatPanel({
   );
 }
 
+/**
+ * 联网搜索开关。
+ *
+ * 带文字标签而不是一个光秃秃的地球图标 —— 纯图标在这排控件里太不显眼，
+ * 用户反馈"有点不明显"。开启态用主色反相（和发送按钮同一套语言），
+ * 单色系里这是最强的"开着"信号。
+ *
+ * **任何模型上都能点。** 之前按 `inferVendor` 的结果禁用，但那只是拿模型 id
+ * 猜厂商，猜错就把能用的功能锁死；`note` 现在只写进 tooltip 当提示，不做拦截。
+ */
+function WebSearchToggle({
+  enabled,
+  note,
+  onToggle,
+}: {
+  enabled: boolean;
+  note: { known: boolean; note: string };
+  onToggle: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-pressed={enabled}
+          className={cn(
+            "gap-1.5 border px-2.5",
+            enabled
+              ? "border-transparent bg-primary text-primary-foreground hover:bg-primary/84"
+              : "border-border text-muted-foreground",
+          )}
+          onClick={onToggle}
+        >
+          <Globe className="size-3.5" />
+          联网
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        {enabled ? "已开启联网搜索 · " : "点一下开启联网搜索 · "}
+        {note.note}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function EmptyState({ hasModels, onManage }: { hasModels: boolean; onManage: () => void }) {
   if (!hasModels) {
     return (
@@ -270,13 +332,14 @@ function EmptyState({ hasModels, onManage }: { hasModels: boolean; onManage: () 
   return <p className="py-20 text-center text-sm text-muted-foreground">发消息开始对话</p>;
 }
 
-function ChatBubble({ message, html }: { message: ConversationMessage; html: string }) {
+function ChatBubble({ message, html, onDelete }: { message: ConversationMessage; html: string; onDelete?: () => void }) {
   if (message.role === "user") {
     return (
       <Message align="end">
         <MessageContent className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-secondary px-3.5 py-2 text-sm">
           {message.content}
         </MessageContent>
+        <DeleteMessageButton onDelete={onDelete} />
       </Message>
     );
   }
@@ -288,7 +351,31 @@ function ChatBubble({ message, html }: { message: ConversationMessage; html: str
         {message.tools?.map((tool) => <ToolChip key={tool.id} name={tool.name} status={tool.status} />)}
         <AssistantBody content={message.content} html={html} />
       </MessageContent>
+      <DeleteMessageButton onDelete={onDelete} />
     </Message>
+  );
+}
+
+/**
+ * 挂在气泡外侧的删除按钮。
+ *
+ * `Message` 是 flex 行，align=end 时整行反向 —— 所以同一个位置的元素
+ * 在用户消息上落到左边、在回复上落到右边，两边都贴着气泡的外沿，
+ * 一套写法两种对齐，不用分别摆。
+ *
+ * 触屏没有 hover，窄屏下常驻显示，否则永远点不到。
+ */
+function DeleteMessageButton({ onDelete }: { onDelete?: () => void }) {
+  if (!onDelete) return null;
+  return (
+    <button
+      type="button"
+      aria-label="删除这条消息"
+      onClick={onDelete}
+      className="mt-1 flex size-6 shrink-0 items-center justify-center self-start rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-60 hover:!opacity-100 max-lg:opacity-60"
+    >
+      <Trash2 className="size-3.5" />
+    </button>
   );
 }
 

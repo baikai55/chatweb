@@ -16,15 +16,15 @@
 | 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
 | IndexedDB | `src/shared/db/idb.ts` | ✅ 手写封装，无第三方依赖；v2 加了 generations |
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
-| 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条 |
+| 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条；列表 portal 到侧栏 |
 | Markdown + XSS 清洗 | `src/features/console/markdown.ts` | ✅ 从 grok2api 移植 |
-| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误 |
+| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/单条消息删除 |
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
 | 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
 | 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 参数控制、URL/Base64、流式兼容、预览与下载 |
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
-| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写 |
+| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写；不再按方言拦人 |
 | 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类覆盖、图片路由、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
 | 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知 |
@@ -36,7 +36,83 @@
 本轮再次运行过 `pnpm check` 和 `pnpm build`，均通过。Vite 仅提示主包超过
 500 KB，不影响构建产物。
 
-## 本轮（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
+## 本轮（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
+
+四件用户反馈，都做完了。`pnpm check` / `pnpm build` 干净，`pnpm test` 44 个用例全过。
+
+主线是一句话：**能力判定全交回用户，代码不猜。** 这一轮把上一轮删探测时
+没顺手清掉的几处"程序内部替用户判断"也一起拆了。
+
+**1. 联网搜索开关做得更显眼**（反馈：「搜索需要手动开关，也行。但是有点不明显」）——
+原来是个光秃秃的地球图标按钮，加了「联网」文字标签，开启态用主色反相
+（和发送按钮同一套语言，单色系里最强的"开着"信号）。
+
+顺手修了个没人发现的 bug：原来禁用态是靠 `disabled` 属性，而 `buttonVariants`
+基类里带 `disabled:pointer-events-none` —— 鼠标事件全没了，**那句解释"为什么用不了"
+的 tooltip 根本弹不出来**。现在压根不禁用了，问题自然没了。
+
+**2. 推理档位和联网搜索对所有模型开放**（反馈：「也都改成所有模型可选吧，
+不限制了」）：
+
+- 推理档位下拉不再要求 `activeModel.reasoning`，一直显示。
+- 联网搜索按钮任何模型都能点。
+- `webSearchSupport()` 改名 `webSearchNote()`，返回 `{known, note}` ——
+  **只写 tooltip，不做拦截**。
+- `buildTools()` 不再对认不出的厂商返回 `[]`。原来那样开关看着生效了其实
+  什么都没发出去，是最糟的一种失败。现在 Gemini 发 `google_search`，
+  其余一律发 `{type:"web_search"}`，上游不认就报错，报错至少指得回来。
+
+风险评估：两个控件的默认值都是不发（`auto` / 关），所以**默认行为一点没变**，
+真发出去一定是用户点过的。CPA 的模型名后缀 `model(high)` 在非推理模型上
+理论上是安全的（后缀是在模型名解析/路由阶段剥掉的，早于选上游），但没实测过；
+真出问题就把 `applyReasoningToModel` 里的 `flavor !== "cpa"` 分支改成全走标准字段。
+
+**3. 语音面板不再按方言拦人**（反馈：「语音点进去显示'当前后端不支持语音面板'。
+这个不应该程序内部判断。设置-后端-不是有个显示哪些面板吗？按这个来判断」）：
+
+`isGrok` 那道硬门删了，只看 `backend.capabilities`。实测 CPA 的 `/tts` `/stt`
+确实全 404，但那是那一台部署的实况，不是 `cpa` 这个方言的定义。
+方言现在只用来在标题栏写一句提醒（"这个后端认出来是 cpa，语音端点未必存在"）。
+
+配套：**声线列表只在 grok2api 上自动拉**，别的后端给一个「加载声线」按钮。
+门一撤，CPA 用户点进语音面板就会自动打一发必 404 的请求 —— 那正是这个项目
+一直在避免的事。不点也能用，上面的输入框可以直接填声线 ID。
+
+**4. 四个面板的历史统一到左侧栏**（反馈：「对话的历史记录在左侧功能下边，
+生图/视频/语音在内容区。统一在左侧好了」）：
+
+用插槽而不是把状态提上去 —— `src/app/sidebar-slot.tsx` 里 `AppShell` 在侧栏
+留一个 DOM 节点走 context 发下去，`GenerationHistory` portal 过去。
+历史的状态（选中哪条、点回一条怎么恢复面板）跟各自面板绑得很紧，
+硬提到 `Console` 得在三个面板之间来回传 record 和回调，插槽方案三个面板
+内部一行都不用动。拿不到插槽时退回原地渲染。
+
+插槽那个 `<div>` **始终挂载**，聊天模式下只是 `hidden` —— 卸了再挂的话
+切到生图那一帧插槽还是 null，历史会先在面板里闪一下再跳到侧栏。
+
+**5. 单条消息可删**（反馈：「单条聊天记录没法删除。需要加个删除」）：
+
+悬停气泡外侧出现删除按钮。`Message` 是 flex 行、align=end 时整行反向，
+所以同一个位置的元素在用户消息上落到左边、在回复上落到右边，一套写法两种对齐。
+触屏没有 hover，窄屏常驻显示。
+
+只删这一条，不连带删问/答 —— 想删整轮就点两下，比"我以为只删一条结果少了两条"强。
+**已知代价**：删掉中间那条 user 之后会出现 assistant 挨着 assistant，
+有些上游要求严格交替会 400。这是用户自己剪的，报错指得回来，没在代码里替他挡。
+
+流式过程中不给删：`send()` 里捏着一份发请求那一刻的 messages，结束时会用它
+拼上回复整个覆盖回去，这中间删掉的会原样长回来。所以 streaming 时按钮不渲染。
+
+顺手修了个真 bug：删到一条消息都不剩时，`saveSession` 对空会话是直接 return
+（本来是为了不给空壳落盘），**结果旧记录还躺在 IndexedDB 里，一刷新整段对话复活**。
+`commit` 现在遇到空 messages 会去 `deleteSession`。
+
+**测试**：`chat-completions.test.ts` 扩到 13 个用例，直接盯 `buildRequestBody`
+产出的请求体 —— 推理档位（auto 不发 / CPA 后缀 / 标准字段 / 手写后缀不叠加）
+和搜索工具（关着不发 / Gemini 特殊形状 / 认不出也照发通用形状）。
+全套 44 个。
+
+## 上一轮（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
 
 三件用户点名的事，都做完了。`pnpm check`、`pnpm build` 干净，`pnpm test` 35 个用例全过。
 
@@ -99,7 +175,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 清掉所有后端的对话和生成记录，**但不动后端配置、密钥和模型缓存** ——
 那些删了得重新填一遍，跟「清历史」不是一回事。清完通过 `historyToken` 让会话 hook 重载。
 
-## 上一轮（设置页重做 + 图片路由）
+## 更早（设置页重做 + 图片路由）
 
 用户点名要借鉴 `gpt-image-playground`，选了四块全做。都做完了，`pnpm check`、
 `pnpm build`、`pnpm test` 干净。设置页从 `app.tsx` 里搬进
@@ -164,7 +240,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 去重、错误信息里的链接不误报）。这些都是纯函数，不打网络。
 （下一轮加了 `chat-completions.test.ts` 的 4 个 `webSearchSupport` 用例，现在共 35 个。）
 
-## 更早（用真实 key 实测后端）
+## 更更早（用真实 key 实测后端）
 
 两个后端的 key 都验证可用。实测发现并修掉了三个语音的真 bug —— 都是「UI 允许但
 上游拒绝」，不实跑发现不了：
@@ -228,8 +304,13 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
   给提示并引导去设置页。
 - **不做能力探测**，用户明确否决过（「有些站发现测活会封号的」）。
   面板显隐手动勾，`capabilities` 为空时全显示。
-- **功能不支持时禁用而不是隐藏**。联网搜索按钮吃过这个亏 —— 隐藏之后用户
-  只会以为功能没了。给禁用态 + 说明原因。
+- **别替用户判断"这个模型/后端支不支持 X"**，用户反复说过三次
+  （探测、语音面板、推理档位与联网搜索）。判定都只是拿 id / 方言猜的，
+  猜错就把能用的功能锁死，而用户看不出是"锁了"还是"没这功能"。
+  能力开关一律交给设置页，代码顶多写一句提示。
+- **不支持也不要隐藏、不要静默不发**。隐藏 → 用户以为功能没了；
+  静默不发 → 开关看着生效其实什么都没做，是最糟的一种失败。
+  让它发出去，让上游报错。
 - 值得借鉴：`https://github.com/baikai55/gpt-image-playground`（已设为 public，TypeScript，
   142 个文件）。用户说它的设置页功能齐全。**本轮已借鉴**：custom provider 的
   `$` 模板 + 点号取图路径设计进了 `image-routes.ts`；`GeneralSettingsTab` 的
@@ -263,9 +344,12 @@ R2 桶名 `chatweb` 已填进 `wrangler.toml`。
 
 CPA **完全没有语音端点**，但它的模型表里有 8 个会被归类成 tts 的模型
 （三个 Gemini TTS、`Gemini 2.5 Flash Native Audio Latest`、两个 Lyria、
-`Gemini 3.1 Flash Live Preview`、`chatgpt-voice`）。语音面板靠
-`backend.flavor === "grok2api"` 挡住了，CPA 用户看到的是「当前后端不支持语音面板」
-而不是一堆点了必报错的模型 —— 这个行为是对的，别改。
+`Gemini 3.1 Flash Live Preview`、`chatgpt-voice`）。
+
+早先语音面板靠 `backend.flavor === "grok2api"` 把 CPA 整个挡在门外 ——
+**本轮已删除**，用户明确否决（「这个不应该程序内部判断」）。上面这张表是
+那一台部署的实况，不是 `cpa` 这个方言的定义。现在只看设置页勾了什么，
+方言只用来在标题栏写一句提醒，外加决定声线列表要不要自动拉。
 
 grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准的
 `/audio/speech` `/audio/transcriptions`。目前 `voice.ts` 走的是原生那对。

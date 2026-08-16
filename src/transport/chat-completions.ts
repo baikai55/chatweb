@@ -45,7 +45,8 @@ export async function streamChatCompletions(options: ChatCompletionsOptions): Pr
   return consumeStream(response, options.onUpdate);
 }
 
-function buildRequestBody(options: ChatCompletionsOptions, flavor: BackendFlavor): Record<string, unknown> {
+/** 导出是为了让单测直接盯请求体 —— 推理档位和搜索工具的形状最容易改错。 */
+export function buildRequestBody(options: ChatCompletionsOptions, flavor: BackendFlavor): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: applyReasoningToModel(options.model, options.reasoningEffort, flavor),
     messages: options.messages.map(({ role, content }) => ({ role, content })),
@@ -83,35 +84,39 @@ function applyReasoningToModel(model: string, effort: ReasoningEffort, flavor: B
  *   Claude 系  → 经 chat/completions 会被 type=="function" 硬过滤静默丢弃，
  *                必须走 /v1/messages 原生协议才能用 web_search
  * 见 CLIProxyAPI gemini_openai_request.go:372 与 claude_openai_request.go:323。
+ *
+ * 只有 Gemini 需要特殊形状，其余一律发通用的 `{type:"web_search"}`。
+ * **不再按厂商拦下来发空数组** —— 这个开关是用户手动点开的，静默不发等于
+ * 开关看着生效了其实什么都没做；宁可让上游报个明确的错。厂商判定本来也只是
+ * 拿模型 id 猜的，猜错的时候不该由它决定发不发。
  */
 function buildTools(options: ChatCompletionsOptions): Array<Record<string, unknown>> {
   if (!options.webSearch) return [];
   const vendor = (options.vendor ?? inferVendor(options.model)).toLowerCase();
   if (vendor === "gemini") return [{ google_search: {} }];
-  if (vendor === "grok" || vendor === "xai") return [{ type: "web_search" }];
-  // Claude / GPT 等经 chat/completions 用不了内置搜索，不发无效字段
-  return [];
+  return [{ type: "web_search" }];
 }
 
 /**
- * 这个模型能不能用联网搜索，不能的话为什么。
+ * 这个模型开联网搜索会怎样。**纯提示，不做拦截** —— UI 无论如何都让点。
  *
- * UI 拿它决定按钮是可点还是禁用 —— **不要用它决定按钮显不显示**。
- * 之前是「不支持就整个隐藏」，结果模型 id 里没写 gemini / grok 的时候
- * 按钮凭空消失，用户只会以为功能没了。禁用 + 说明原因才讲得通。
+ * 早先这里返回 `supported`，UI 拿它禁用甚至隐藏按钮。两个问题：一是隐藏之后
+ * 模型 id 里没写 gemini / grok 的时候按钮凭空消失，用户只会以为功能没了；
+ * 二是判定本身只是拿模型 id 猜的（`inferVendor`），猜错就把能用的功能锁死了。
+ * 现在只用来写 tooltip，让人知道点下去大概会发生什么。
  */
-export function webSearchSupport(model: string): { supported: boolean; reason: string } {
-  if (!model) return { supported: false, reason: "先选一个模型" };
+export function webSearchNote(model: string): { known: boolean; note: string } {
+  if (!model) return { known: false, note: "先选一个模型" };
   const vendor = inferVendor(model);
-  if (vendor === "gemini") return { supported: true, reason: "走 Gemini 原生 google_search" };
-  if (vendor === "grok") return { supported: true, reason: "走 web_search 工具" };
+  if (vendor === "gemini") return { known: true, note: "走 Gemini 原生 google_search" };
+  if (vendor === "grok") return { known: true, note: "走 web_search 工具" };
   if (vendor === "claude") {
     return {
-      supported: false,
-      reason: "Claude 经 chat/completions 会把搜索工具静默丢弃，得走 /v1/messages（还没做）",
+      known: false,
+      note: "Claude 经 chat/completions 通常会把搜索工具静默丢弃（原生得走 /v1/messages，还没做），开了多半没效果，但也不会报错",
     };
   }
-  return { supported: false, reason: `${model} 经 chat/completions 用不了内置搜索` };
+  return { known: false, note: "没验过这个模型，会照常发 web_search 工具 —— 上游不认的话会直接报错" };
 }
 
 export function inferVendor(model: string): string {

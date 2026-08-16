@@ -1,9 +1,10 @@
 import { AudioLines, ImageIcon, MessageSquareText, PanelLeft, Plus, Settings2, Trash2, Video, X } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SidebarSlotProvider } from "@/app/sidebar-slot";
 import type { Backend, Capability } from "@/backends/types";
 import type { ChatSession } from "@/features/console/chat-store";
 import { cn } from "@/shared/lib/cn";
@@ -62,7 +63,10 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 生图/视频/语音的历史往这里 portal，见 sidebar-slot.tsx */
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const modes = availableModes(backend);
+  const slotValue = useMemo(() => ({ element: slot, onNavigate: () => setDrawerOpen(false) }), [slot]);
 
   // 当前模式被后端能力砍掉了（比如从 grok2api 切到 CPA 时正停在语音），回落到第一个可用的
   useEffect(() => {
@@ -125,9 +129,20 @@ export function AppShell({
             onDelete={onDeleteSession}
             onNew={() => { onNewChat(); setDrawerOpen(false); }}
           />
-        ) : (
-          <div className="flex-1" />
-        )}
+        ) : null}
+
+        {/*
+          生图/视频/语音的历史 portal 到这里来，跟会话列表同一个位置。
+          **始终挂载**，聊天模式下只是 hidden —— 卸了再挂的话切到生图那一帧
+          插槽还是 null，历史会先在面板里闪一下再跳到侧栏。
+        */}
+        <div
+          ref={setSlot}
+          className={cn(
+            "flex min-h-0 flex-1 flex-col",
+            mode === "chat" && !settingsOpen && "hidden",
+          )}
+        />
 
         <div className="flex flex-col gap-1.5 border-t p-2">
           <Select value={backend.id} onValueChange={onBackendChange}>
@@ -163,7 +178,11 @@ export function AppShell({
           </span>
         </div>
 
-        <main className="min-h-0 flex-1">{children}</main>
+        <main className="min-h-0 flex-1">
+          <SidebarSlotProvider value={slotValue}>
+            {children}
+          </SidebarSlotProvider>
+        </main>
       </div>
     </div>
   );

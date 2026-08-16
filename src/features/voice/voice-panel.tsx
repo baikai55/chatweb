@@ -61,10 +61,19 @@ export type VoicePanelProps = {
 };
 
 export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
+  /**
+   * 能不能用只看设置页勾了什么，**不看后端方言**。
+   *
+   * 早先这里硬判 `backend.flavor === "grok2api"`，CPA 用户点进语音面板只能看到
+   * 一句"当前后端不支持语音面板"。实测确实是 CPA 的 /tts /stt 全 404，但那是
+   * 那一台部署的实况，不是 `cpa` 这个方言的定义 —— 换一台配了语音的 CPA
+   * 就被冤枉了。判断权交回设置页的「显示哪些面板」。
+   *
+   * 一个都没勾时两个都放出来（`capabilities` 为空 = 用户没表过态）。
+   */
   const knownCapabilities = backend.capabilities.length > 0;
-  const isGrok = backend.flavor === "grok2api";
-  const hasTTS = isGrok && (!knownCapabilities || backend.capabilities.includes("tts"));
-  const hasSTT = isGrok && (!knownCapabilities || backend.capabilities.includes("stt"));
+  const hasTTS = !knownCapabilities || backend.capabilities.includes("tts");
+  const hasSTT = !knownCapabilities || backend.capabilities.includes("stt");
   const [mode, setMode] = useState<VoiceMode>(() => hasTTS ? "tts" : "stt");
 
   const ttsModels = useMemo(
@@ -107,7 +116,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
   }, []);
 
   const history = useGenerationHistory(backend.id, "voice");
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
 
   /**
@@ -116,7 +124,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
    */
   function showRecord(item: GenerationRecord) {
     setError("");
-    setHistoryOpen(false);
     setActiveRecordId(item.id);
 
     if (item.text !== undefined) {
@@ -165,8 +172,17 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     return () => URL.revokeObjectURL(url);
   }, [audioFile]);
 
+  /**
+   * 声线列表。
+   *
+   * 只在方言确定是 grok2api 时自动拉 —— 别的后端上 `/tts/voices` 大概率是 404，
+   * 进个面板就自动打一发无谓的请求正是这个项目一直在避免的事。
+   * 那种情况下改成手动点「加载声线」，不点就用输入框直接填声线 ID。
+   */
+  const autoLoadVoices = backend.flavor === "grok2api";
+
   useEffect(() => {
-    if (mode !== "tts" || !hasTTS || !ttsModel) {
+    if (mode !== "tts" || !hasTTS || !ttsModel || (!autoLoadVoices && voiceReload === 0)) {
       setVoices([]);
       setVoicesError("");
       setVoicesLoading(false);
@@ -193,21 +209,12 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     });
 
     return () => controller.abort();
-  }, [backend.apiKey, backend.baseURL, hasTTS, mode, ttsModel, voiceReload]);
+  }, [autoLoadVoices, backend.apiKey, backend.baseURL, hasTTS, mode, ttsModel, voiceReload]);
 
   useEffect(() => () => {
     requestRef.current?.abort();
     releaseSpeechAudio(audioResultRef.current);
   }, []);
-
-  if (!isGrok) {
-    return (
-      <CapabilityGuide
-        title="当前后端不支持语音面板"
-        detail={`已连接 ${backend.name}（${backend.flavor}）。TTS/STT 需要切换到 grok2api 后端。`}
-      />
-    );
-  }
 
   if (!hasTTS && !hasSTT) {
     return (
@@ -361,16 +368,25 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        {!knownCapabilities ? (
-          <span className="ml-auto text-xs text-muted-foreground">没勾过面板，两个都放出来了</span>
-        ) : null}
+        {/*
+          方言不对不再拦人，但该提醒还是提醒一句 —— 实测 CPA 那台的
+          /tts /stt 全是 404，直接点下去会拿到一条不知所云的报错。
+          这是提示，不是门。
+        */}
+        {backend.flavor === "grok2api" ? (
+          !knownCapabilities ? (
+            <span className="ml-auto text-xs text-muted-foreground">没勾过面板，两个都放出来了</span>
+          ) : null
+        ) : (
+          <span className="ml-auto text-right text-xs leading-4 text-muted-foreground">
+            这个后端认出来是 {backend.flavor}，语音端点未必存在（实测 CPA 是 404）
+          </span>
+        )}
       </div>
 
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
-        open={historyOpen}
-        onToggle={() => setHistoryOpen((value) => !value)}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);
@@ -479,6 +495,13 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
                   </div>
                 ) : voicesLoading ? (
                   <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" />正在加载声线</p>
+                ) : !autoLoadVoices && voices.length === 0 ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="min-w-0 flex-1">声线列表不自动拉（这个后端未必有这个端点）。上面的输入框可以直接填 ID。</span>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setVoiceReload((value) => value + 1)}>
+                      <RefreshCw className="size-3.5" />加载声线
+                    </Button>
+                  </div>
                 ) : null}
 
                 <SubmitRow

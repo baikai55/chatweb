@@ -87,7 +87,6 @@ export function ImagePanel({
   const settings = useAppSettings();
 
   const history = useGenerationHistory(backend.id, "image");
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
   // 打开历史记录时造的对象 URL 要释放，换一条或卸载时调
   const releaseRef = useRef<(() => void) | null>(null);
@@ -102,7 +101,6 @@ export function ImagePanel({
     setActiveRecordId(record.id);
     setError("");
     setPrompt(record.title);
-    setHistoryOpen(false);
   }
 
   const model = imageModels.some((item) => item.id === selectedModel)
@@ -207,8 +205,6 @@ export function ImagePanel({
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
-        open={historyOpen}
-        onToggle={() => setHistoryOpen((value) => !value)}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);

@@ -92,7 +92,6 @@ export function VideoPanel({
   const settings = useAppSettings();
 
   const history = useGenerationHistory(backend.id, "video");
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
   const releaseRef = useRef<(() => void) | null>(null);
 
@@ -125,7 +124,6 @@ export function VideoPanel({
     setActiveRecordId(item.id);
     setFormError("");
     setPrompt(item.title);
-    setHistoryOpen(false);
   }
 
   const busy = run.phase === "uploading" || run.phase === "submitting" || run.phase === "polling";
@@ -318,8 +316,6 @@ export function VideoPanel({
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
-        open={historyOpen}
-        onToggle={() => setHistoryOpen((value) => !value)}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);

@@ -1,26 +1,90 @@
 import { describe, expect, it } from "vitest";
 
-import { webSearchSupport } from "@/transport/chat-completions";
+import { buildRequestBody, webSearchNote } from "@/transport/chat-completions";
+import type { ChatCompletionsOptions } from "@/transport/chat-completions";
 
-describe("webSearchSupport", () => {
-  it("Gemini 和 Grok 可用", () => {
-    expect(webSearchSupport("gemini-2.5-pro").supported).toBe(true);
-    expect(webSearchSupport("grok-4").supported).toBe(true);
+function options(patch: Partial<ChatCompletionsOptions> = {}): ChatCompletionsOptions {
+  return {
+    baseURL: "https://example.com/v1",
+    apiKey: "sk-test",
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "hi" }],
+    reasoningEffort: "auto",
+    webSearch: false,
+    ...patch,
+  };
+}
+
+describe("webSearchNote", () => {
+  it("认得出的模型说清会发什么形状", () => {
+    expect(webSearchNote("gemini-2.5-pro")).toMatchObject({ known: true });
+    expect(webSearchNote("grok-4")).toMatchObject({ known: true });
   });
 
-  it("Claude 不可用，并说明要走 /v1/messages", () => {
-    const result = webSearchSupport("claude-sonnet-4-5");
-    expect(result.supported).toBe(false);
-    expect(result.reason).toContain("/v1/messages");
+  it("Claude 提示多半会被静默丢弃，但不拦着", () => {
+    const result = webSearchNote("claude-sonnet-4-5");
+    expect(result.known).toBe(false);
+    expect(result.note).toContain("/v1/messages");
   });
 
-  it("认不出的模型不可用，但仍然给出理由 —— 按钮要禁用而不是消失", () => {
-    const result = webSearchSupport("some-random-model");
-    expect(result.supported).toBe(false);
-    expect(result.reason).not.toBe("");
+  it("认不出的模型也给一句话 —— 它只是提示，不决定按钮能不能点", () => {
+    expect(webSearchNote("some-random-model").note).not.toBe("");
   });
 
   it("没选模型时提示先选模型", () => {
-    expect(webSearchSupport("").reason).toBe("先选一个模型");
+    expect(webSearchNote("").note).toBe("先选一个模型");
+  });
+});
+
+describe("buildRequestBody 的联网搜索工具", () => {
+  it("开关关着时一个 tools 字段都不加", () => {
+    expect(buildRequestBody(options(), "generic")).not.toHaveProperty("tools");
+  });
+
+  it("Gemini 用原生 google_search 形状", () => {
+    const body = buildRequestBody(options({ model: "gemini-2.5-pro", webSearch: true }), "cpa");
+    expect(body.tools).toEqual([{ google_search: {} }]);
+  });
+
+  it("认不出厂商时照发通用 web_search，而不是静默发空", () => {
+    // 之前这里返回 []，开关看着生效了其实什么都没发出去。
+    // 宁可让上游报个明确的错 —— 厂商判定本来就只是拿模型 id 猜的。
+    const body = buildRequestBody(options({ model: "deepseek-chat", webSearch: true }), "generic");
+    expect(body.tools).toEqual([{ type: "web_search" }]);
+  });
+
+  it("Claude 也照发 —— CPA 会静默过滤掉，但换个后端可能就认", () => {
+    const body = buildRequestBody(options({ model: "claude-sonnet-4-5", webSearch: true }), "cpa");
+    expect(body.tools).toEqual([{ type: "web_search" }]);
+  });
+});
+
+describe("buildRequestBody 的推理档位", () => {
+  it("auto 什么都不发 —— 这是默认值，不该动上游的默认行为", () => {
+    const body = buildRequestBody(options({ model: "gemini-2.5-pro" }), "cpa");
+    expect(body.model).toBe("gemini-2.5-pro");
+    expect(body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("CPA 走模型名后缀，不发 reasoning_effort", () => {
+    const body = buildRequestBody(options({ model: "gemini-2.5-pro", reasoningEffort: "high" }), "cpa");
+    expect(body.model).toBe("gemini-2.5-pro(high)");
+    expect(body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("其余后端走标准字段，模型名不动", () => {
+    const body = buildRequestBody(options({ model: "gpt-5", reasoningEffort: "high" }), "generic");
+    expect(body.model).toBe("gpt-5");
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("模型名里已经手写了后缀就不再加一层", () => {
+    const body = buildRequestBody(options({ model: "gemini-2.5-pro(8192)", reasoningEffort: "high" }), "cpa");
+    expect(body.model).toBe("gemini-2.5-pro(8192)");
+  });
+
+  it("不是推理模型也照样加档位 —— 上层不再按模型能力拦，报错交给上游", () => {
+    const body = buildRequestBody(options({ model: "deepseek-chat", reasoningEffort: "low" }), "generic");
+    expect(body.reasoning_effort).toBe("low");
   });
 });
