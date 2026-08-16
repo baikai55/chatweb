@@ -23,6 +23,8 @@ import { clearAllGenerations } from "@/features/history/generation-store";
 import { estimateUsage } from "@/shared/db/idb";
 import { cn } from "@/shared/lib/cn";
 import {
+  IMAGE_TIMEOUT_MAX_SECONDS,
+  IMAGE_TIMEOUT_MIN_SECONDS,
   patchAppSettings,
   requestNotificationPermission,
   useAppSettings,
@@ -710,7 +712,52 @@ function BehaviorSection() {
           />
         }
       />
+      <SettingRow
+        label="图片等待上限"
+        description={`上游多久没吐字节就判定卡死。默认 300 秒 —— 生图本来就慢（实测单张 68 秒，高质量 103 秒），而且 CPA 换上游重试时会静默一段。太小会把本来会成功的生成掐掉。范围 ${IMAGE_TIMEOUT_MIN_SECONDS}–${IMAGE_TIMEOUT_MAX_SECONDS} 秒。`}
+        control={<ImageTimeoutInput />}
+      />
     </section>
+  );
+}
+
+/**
+ * 秒数输入。用本地 state 而不是直接写 settings ——
+ * 直接写的话删到空或者中途是个非法值就会被 clamp 回去，光标乱跳。
+ * 失焦时才规整并落盘。
+ */
+function ImageTimeoutInput() {
+  const settings = useAppSettings();
+  const [draft, setDraft] = useState(String(settings.imageTimeoutSeconds));
+
+  useEffect(() => { setDraft(String(settings.imageTimeoutSeconds)); }, [settings.imageTimeoutSeconds]);
+
+  function commit(): void {
+    const parsed = Number.parseInt(draft, 10);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(settings.imageTimeoutSeconds));
+      return;
+    }
+    const clamped = Math.min(IMAGE_TIMEOUT_MAX_SECONDS, Math.max(IMAGE_TIMEOUT_MIN_SECONDS, parsed));
+    patchAppSettings({ imageTimeoutSeconds: clamped });
+    setDraft(String(clamped));
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-1.5">
+      <Input
+        type="number"
+        inputMode="numeric"
+        min={IMAGE_TIMEOUT_MIN_SECONDS}
+        max={IMAGE_TIMEOUT_MAX_SECONDS}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        aria-label="图片等待上限（秒）"
+        className="h-8 w-20 text-xs"
+      />
+      <span className="text-xs text-muted-foreground">秒</span>
+    </div>
   );
 }
 

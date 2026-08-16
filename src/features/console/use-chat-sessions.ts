@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  clearScopeSessions,
   createBlankSession,
   deleteSession,
   deriveSessionTitle,
@@ -87,5 +88,11 @@ export function useChatSessions(scope: string, defaultModel: string, reloadToken
     void deleteSession(id);
   }, [scope]);
 
-  return { sessions, current, loading, commit, startNew, open, remove };
+  const clearAll = useCallback(() => {
+    setSessions([]);
+    setCurrent(createBlankSession(scope, defaultModelRef.current));
+    void clearScopeSessions(scope);
+  }, [scope]);
+
+  return { sessions, current, loading, commit, startNew, open, remove, clearAll };
 }

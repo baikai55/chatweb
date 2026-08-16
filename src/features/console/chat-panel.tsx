@@ -1,5 +1,6 @@
-import { ArrowUp, BrainCircuit, Globe, Loader2, Square, Trash2, TriangleAlert, Wrench } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ArrowUp, BrainCircuit, Copy, Globe, Loader2, RefreshCw, Square, Trash2, TriangleAlert, Wrench } from "lucide-react";
+import { useCallback, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Message, MessageContent } from "@/components/ui/message";
@@ -44,6 +45,14 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState<ChatStreamSnapshot | null>(null);
   const [error, setError] = useState("");
+  /**
+   * 哪条消息露出了操作按钮。
+   *
+   * 移动端没有 hover，按钮要么一直挂在那儿（每条消息都挂三个图标，很吵），
+   * 要么点一下才出来。选后者：点消息展开，点别处收起。
+   * 桌面端 hover 也照样能出，两种输入方式各走各的。
+   */
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const settings = useAppSettings();
 
@@ -137,11 +146,43 @@ export function ChatPanel({
    * 报错也指得回来，所以不在这里替他挡。
    */
   function deleteMessage(id: string) {
+    setSelectedId(null);
     onCommit({
       ...session,
       messages: session.messages.filter((message) => message.id !== id),
       updatedAt: Date.now(),
     });
+  }
+
+  async function copyMessage(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("已复制");
+    } catch {
+      // http 页面或者用户拒了剪贴板权限。别静默失败，不然像是按钮坏了。
+      toast.error("复制失败，浏览器不给剪贴板权限");
+    }
+  }
+
+  /**
+   * 从这条消息重新生成。
+   *
+   * 点在回复上 = 丢掉这条回复，拿它前面的上下文重问一次；
+   * 点在提问上 = 从这一问重来，它后面的全部丢掉。
+   * 两种都是"回到这里再跑一遍"，所以共用一个按钮。
+   *
+   * 丢掉的部分不进历史 —— 想留旧回复就先复制走。
+   */
+  function regenerateFrom(id: string) {
+    if (streaming) return;
+    setSelectedId(null);
+    const index = session.messages.findIndex((message) => message.id === id);
+    if (index < 0) return;
+    const target = session.messages[index];
+    const kept = session.messages.slice(0, target.role === "user" ? index + 1 : index);
+    if (kept.length === 0) return;
+    const base = { ...session, model };
+    void send(kept, base);
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -161,7 +202,8 @@ export function ChatPanel({
   );
 
   return (
-    <div className="flex h-full flex-col">
+    /* 点消息以外的任何地方都收起操作按钮 —— 不用另外找"取消"的地方 */
+    <div className="flex h-full flex-col" onClick={() => setSelectedId(null)}>
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
         <ModelPicker
           models={models}
@@ -217,11 +259,15 @@ export function ChatPanel({
                   <ChatBubble
                     message={message}
                     html={html}
+                    selected={selectedId === message.id}
+                    onSelect={() => setSelectedId((current) => current === message.id ? null : message.id)}
+                    onCopy={() => { void copyMessage(message.content); }}
                     /*
-                      流式过程中不给删 —— `send()` 里捏着一份发请求那一刻的
-                      messages，结束时会用它拼上回复整个覆盖回去，
-                      这中间删掉的消息会原样长回来。
+                      流式过程中不给删也不给重生成 —— `send()` 里捏着一份发请求
+                      那一刻的 messages，结束时会用它拼上回复整个覆盖回去，
+                      这中间改过的都会被原样冲掉。
                     */
+                    onRegenerate={streaming ? undefined : () => regenerateFrom(message.id)}
                     onDelete={streaming ? undefined : () => deleteMessage(message.id)}
                   />
                 </MessageScrollerItem>
@@ -332,49 +378,86 @@ function EmptyState({ hasModels, onManage }: { hasModels: boolean; onManage: () 
   return <p className="py-20 text-center text-sm text-muted-foreground">发消息开始对话</p>;
 }
 
-function ChatBubble({ message, html, onDelete }: { message: ConversationMessage; html: string; onDelete?: () => void }) {
-  if (message.role === "user") {
-    return (
-      <Message align="end">
-        <MessageContent className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-secondary px-3.5 py-2 text-sm">
-          {message.content}
-        </MessageContent>
-        <DeleteMessageButton onDelete={onDelete} />
-      </Message>
-    );
-  }
+type BubbleActions = {
+  selected: boolean;
+  onSelect: () => void;
+  onCopy: () => void;
+  onRegenerate?: () => void;
+  onDelete?: () => void;
+};
+
+function ChatBubble({
+  message,
+  html,
+  ...actions
+}: { message: ConversationMessage; html: string } & BubbleActions) {
+  const body = message.role === "user" ? (
+    <MessageContent className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-secondary px-3.5 py-2 text-sm">
+      {message.content}
+    </MessageContent>
+  ) : (
+    <MessageContent className="w-full text-sm">
+      {message.reasoning ? <ReasoningBlock text={message.reasoning} /> : null}
+      {message.tools?.map((tool) => <ToolChip key={tool.id} name={tool.name} status={tool.status} />)}
+      <AssistantBody content={message.content} html={html} />
+    </MessageContent>
+  );
 
   return (
-    <Message>
-      <MessageContent className="w-full text-sm">
-        {message.reasoning ? <ReasoningBlock text={message.reasoning} /> : null}
-        {message.tools?.map((tool) => <ToolChip key={tool.id} name={tool.name} status={tool.status} />)}
-        <AssistantBody content={message.content} html={html} />
-      </MessageContent>
-      <DeleteMessageButton onDelete={onDelete} />
-    </Message>
+    <div
+      /* 阻止冒泡，否则这一下会立刻被外层的"点别处收起"抵消掉 */
+      onClick={(event) => { event.stopPropagation(); actions.onSelect(); }}
+      className="group/bubble flex flex-col gap-1"
+    >
+      <Message align={message.role === "user" ? "end" : "start"}>{body}</Message>
+      <MessageActions {...actions} align={message.role === "user" ? "end" : "start"} />
+    </div>
   );
 }
 
 /**
- * 挂在气泡外侧的删除按钮。
+ * 复制 / 重新生成 / 删除。
  *
- * `Message` 是 flex 行，align=end 时整行反向 —— 所以同一个位置的元素
- * 在用户消息上落到左边、在回复上落到右边，两边都贴着气泡的外沿，
- * 一套写法两种对齐，不用分别摆。
- *
- * 触屏没有 hover，窄屏下常驻显示，否则永远点不到。
+ * 常驻占位但默认透明 —— 显隐时不改变高度，列表不会在手底下跳。
+ * 桌面端 hover 出现，移动端点一下消息出现（`selected`），点别处收起。
  */
-function DeleteMessageButton({ onDelete }: { onDelete?: () => void }) {
-  if (!onDelete) return null;
+function MessageActions({
+  selected,
+  align,
+  onCopy,
+  onRegenerate,
+  onDelete,
+}: BubbleActions & { align: "start" | "end" }) {
+  return (
+    <div
+      className={cn(
+        "flex h-6 items-center gap-0.5 opacity-0 transition-opacity",
+        "pointer-events-none group-hover/bubble:pointer-events-auto group-hover/bubble:opacity-100",
+        align === "end" && "justify-end",
+        selected && "pointer-events-auto opacity-100",
+      )}
+    >
+      <ActionButton label="复制" onClick={onCopy}><Copy className="size-3.5" /></ActionButton>
+      {onRegenerate ? (
+        <ActionButton label="重新生成" onClick={onRegenerate}><RefreshCw className="size-3.5" /></ActionButton>
+      ) : null}
+      {onDelete ? (
+        <ActionButton label="删除这条消息" onClick={onDelete}><Trash2 className="size-3.5" /></ActionButton>
+      ) : null}
+    </div>
+  );
+}
+
+function ActionButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
-      aria-label="删除这条消息"
-      onClick={onDelete}
-      className="mt-1 flex size-6 shrink-0 items-center justify-center self-start rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-60 hover:!opacity-100 max-lg:opacity-60"
+      aria-label={label}
+      title={label}
+      onClick={(event) => { event.stopPropagation(); onClick(); }}
+      className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
     >
-      <Trash2 className="size-3.5" />
+      {children}
     </button>
   );
 }

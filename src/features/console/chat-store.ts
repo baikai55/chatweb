@@ -100,6 +100,16 @@ export async function clearAllSessions(): Promise<void> {
   await idbClear(STORE_SESSIONS);
 }
 
+/** 只清掉一个后端的会话。侧栏标题旁的「清空」用。 */
+export async function clearScopeSessions(scope: string): Promise<void> {
+  try {
+    const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
+    await Promise.all(rows.map((session) => idbDelete(STORE_SESSIONS, session.id)));
+  } catch {
+    // 忽略
+  }
+}
+
 /** 超出上限时清理最旧的。在保存后异步调用即可，不用等它。 */
 export async function pruneSessions(scope: string): Promise<void> {
   try {

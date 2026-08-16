@@ -11,14 +11,14 @@
 |---|---|---|
 | SSE 解析 | `src/transport/sse.ts` | ✅ 含 90s 静默超时、8MB 缓冲上限 |
 | chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 两个后端实测通过 |
-| 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状 |
+| 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状；费解的报错补人话，有单测 |
 | 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod |
 | 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
 | IndexedDB | `src/shared/db/idb.ts` | ✅ 手写封装，无第三方依赖；v2 加了 generations |
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
 | 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条；列表 portal 到侧栏 |
 | Markdown + XSS 清洗 | `src/features/console/markdown.ts` | ✅ 从 grok2api 移植 |
-| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/单条消息删除 |
+| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/单条消息复制·重生成·删除 |
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
 | 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
@@ -27,7 +27,7 @@
 | 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写；不再按方言拦人 |
 | 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类覆盖、图片路由、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
-| 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知 |
+| 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知、图片等待上限 |
 | Worker | `worker/*.ts` | ✅ R2 上传往返字节一致、路径穿越已挡、CSP 已下发 |
 
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
@@ -36,7 +36,64 @@
 本轮再次运行过 `pnpm check` 和 `pnpm build`，均通过。Vite 仅提示主包超过
 500 KB，不影响构建产物。
 
-## 本轮（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
+## 本轮（实测反馈：图片超时可调 + 消息操作改成点开 + 侧栏清空）
+
+用户在真机（移动端）用起来之后的四条反馈。`pnpm check` / `pnpm build` 干净，
+`pnpm test` 53 个用例全过。
+
+**1. 那个 HTTP 499 不是我们的 bug** —— 用户看到使用日志里
+`Post "https://ai.xmiaom.com/v1/images/generations": context canceled` 一次 499，
+紧跟一条成功。`ai.xmiaom.com` 是 CPA 背后的**上游供应商**，`context canceled`
+是 Go 的 context —— 这是 CPA 取消了第一家上游又换了第二家，浏览器只发了一次。
+
+但它暴露了一个真隐患：图片如果走 SSE，`readSSE` 的默认静默超时是 90 秒，
+而生图本身就要 68–103 秒，加上 CPA 换家重试的静默时间，90 秒会把一次
+**本来会成功**的生成掐掉。默认放宽到 300 秒，并按用户要求做成了设置项
+（`imageTimeoutSeconds`，30–1800 秒，行为页最后一行）。
+
+**2. DeepSeek 的 400 正是预期内的失败，但报错读不懂** ——
+``unknown variant `web_search`, expected `function` ``。这说明上一轮"认不出厂商
+也照发 `{type:"web_search"}`"的取舍是对的：**错误确实指得回来**。
+但原文全是「deserialize the JSON body into the target type」，用户看不出是自己
+点的那个开关引起的，所以 `errors.ts` 的 `annotate()` 里针对 400 + `web_search`
+补了一句"把工具栏里的「联网」关掉"。顺手修了 404 那条 —— 它还在让用户
+"去设置里重新探测一次"，而探测早删了。新增 `errors.test.ts` 9 个用例钉住。
+
+用户还提到「我在 opencode 让模型联网查东西是可以的」。那是两种机制：
+opencode 把搜索做成**由客户端执行的 function tool**（模型发调用，opencode 自己
+去搜再把结果喂回去），这里发的是 `{type:"web_search"}` 请**上游**用它的内置搜索。
+上游没有内置搜索时前者仍然可用。要做到一样得实现工具调用循环 + 一个搜索源，
+**没做，也没偷偷做**。
+
+**3. 消息操作改成点开，加了复制和重新生成**（反馈：「不要一直显示着。
+点一下在显示，点别的地方隐藏好了。再加个复制，刷新吧。看的是移动端」）：
+
+上一轮的删除按钮在窄屏是 `max-lg:opacity-60` 常驻的 —— 每条消息挂一个图标很吵。
+现在是 `selectedId` 控制：点消息展开，点别处收起（外层 div 一个 onClick，
+气泡里 `stopPropagation`）；桌面端 hover 照样能出，两种输入方式各走各的。
+
+按钮行**常驻占位但默认透明**（`h-6` + `opacity-0`），显隐不改变高度，
+否则点一下整个列表会往下跳一格。
+
+「重新生成」的语义：点在回复上 = 丢掉这条回复用它前面的上下文重问；
+点在提问上 = 从这一问重来、后面全丢。丢掉的部分不进历史。
+
+注意 `group/bubble` 是新加在外层包裹 div 上的，不是复用 `Message` 自带的
+`group/message` —— 按钮行是 `Message` 的**兄弟**不是后代，用 `group/message`
+选不中。
+
+**4. 侧栏每个列表标题旁都有「清空」**（反馈：「加删除不是在对话上加，
+是左侧面板的标题处。我看生图-历史-旁边那个清空就挺合适的」）：
+
+会话列表补了「对话 (N)」标题行 + 清空，和三个生成历史长得一样。
+新增 `clearScopeSessions(scope)`（只清当前后端）和 `useChatSessions().clearAll`。
+
+两个清空都换成了 `ConfirmButton`（`src/components/ui/confirm-button.tsx`）：
+第一下变「确认清空」，4 秒没有第二下自己变回去。删的都是攒了很久的东西，
+而按钮就贴在标题旁，移动端误触没有找补余地；弹确认框对一个列表标题旁的
+小按钮又太重。放着不管就是取消，不用另找地方点"否"。
+
+## 上一轮（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
 
 四件用户反馈，都做完了。`pnpm check` / `pnpm build` 干净，`pnpm test` 44 个用例全过。
 
@@ -112,7 +169,7 @@
 和搜索工具（关着不发 / Gemini 特殊形状 / 认不出也照发通用形状）。
 全套 44 个。
 
-## 上一轮（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
+## 更早（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
 
 三件用户点名的事，都做完了。`pnpm check`、`pnpm build` 干净，`pnpm test` 35 个用例全过。
 
@@ -175,7 +232,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 清掉所有后端的对话和生成记录，**但不动后端配置、密钥和模型缓存** ——
 那些删了得重新填一遍，跟「清历史」不是一回事。清完通过 `historyToken` 让会话 hook 重载。
 
-## 更早（设置页重做 + 图片路由）
+## 更更早（设置页重做 + 图片路由）
 
 用户点名要借鉴 `gpt-image-playground`，选了四块全做。都做完了，`pnpm check`、
 `pnpm build`、`pnpm test` 干净。设置页从 `app.tsx` 里搬进
@@ -240,7 +297,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 去重、错误信息里的链接不误报）。这些都是纯函数，不打网络。
 （下一轮加了 `chat-completions.test.ts` 的 4 个 `webSearchSupport` 用例，现在共 35 个。）
 
-## 更更早（用真实 key 实测后端）
+## 最早（用真实 key 实测后端）
 
 两个后端的 key 都验证可用。实测发现并修掉了三个语音的真 bug —— 都是「UI 允许但
 上游拒绝」，不实跑发现不了：

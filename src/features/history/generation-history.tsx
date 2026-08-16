@@ -2,7 +2,7 @@ import { Trash2 } from "lucide-react";
 import { createPortal } from "react-dom";
 
 import { useSidebarSlot } from "@/app/sidebar-slot";
-import { Button } from "@/components/ui/button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import type { GenerationRecord } from "@/features/history/generation-store";
 import { cn } from "@/shared/lib/cn";
 
@@ -40,9 +40,7 @@ export function GenerationHistory({
           历史{records.length > 0 ? ` (${records.length})` : ""}
         </span>
         {records.length > 0 ? (
-          <Button variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs font-normal" onClick={onClear}>
-            清空
-          </Button>
+          <ConfirmButton className="ml-auto" label="清空" confirmLabel="确认清空" onConfirm={onClear} />
         ) : null}
       </div>
 

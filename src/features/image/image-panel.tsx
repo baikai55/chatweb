@@ -149,6 +149,7 @@ export function ImagePanel({
         ...(effectiveDimension === "size" ? { size } : { aspectRatio }),
         ...(quality === "default" ? {} : { quality }),
         responseFormat,
+        idleTimeoutMs: settings.imageTimeoutSeconds * 1000,
         signal: controller.signal,
         onUpdate: setImages,
       });

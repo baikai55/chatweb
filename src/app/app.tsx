@@ -126,6 +126,7 @@ function Console({
       currentSessionId={chat.current.id}
       onOpenSession={(id) => { chat.open(id); setSettingsOpen(false); }}
       onDeleteSession={chat.remove}
+      onClearSessions={chat.clearAll}
       onNewChat={() => { chat.startNew(chatModels[0]?.id ?? ""); setSettingsOpen(false); }}
     >
       {settingsOpen ? (

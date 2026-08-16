@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SidebarSlotProvider } from "@/app/sidebar-slot";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import type { Backend, Capability } from "@/backends/types";
 import type { ChatSession } from "@/features/console/chat-store";
 import { cn } from "@/shared/lib/cn";
@@ -45,6 +46,7 @@ export function AppShell({
   currentSessionId,
   onOpenSession,
   onDeleteSession,
+  onClearSessions,
   onNewChat,
   children,
 }: {
@@ -59,6 +61,7 @@ export function AppShell({
   currentSessionId: string;
   onOpenSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onClearSessions: () => void;
   onNewChat: () => void;
   children: ReactNode;
 }) {
@@ -127,6 +130,7 @@ export function AppShell({
             currentId={currentSessionId}
             onOpen={(id) => { onOpenSession(id); setDrawerOpen(false); }}
             onDelete={onDeleteSession}
+            onClearAll={onClearSessions}
             onNew={() => { onNewChat(); setDrawerOpen(false); }}
           />
         ) : null}
@@ -193,12 +197,14 @@ function SessionList({
   currentId,
   onOpen,
   onDelete,
+  onClearAll,
   onNew,
 }: {
   sessions: ChatSession[];
   currentId: string;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
+  onClearAll: () => void;
   onNew: () => void;
 }) {
   return (
@@ -207,6 +213,16 @@ function SessionList({
         <Button variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 px-2 text-xs font-normal" onClick={onNew}>
           <Plus className="size-3.5" />新对话
         </Button>
+      </div>
+
+      {/* 标题旁的「清空」，跟生图/视频/语音那三个历史列表摆在同一个位置 */}
+      <div className="flex items-center gap-1 px-4 pb-1">
+        <span className="text-xs text-muted-foreground">
+          对话{sessions.length > 0 ? ` (${sessions.length})` : ""}
+        </span>
+        {sessions.length > 0 ? (
+          <ConfirmButton className="ml-auto" label="清空" confirmLabel="确认清空" onConfirm={onClearAll} />
+        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">

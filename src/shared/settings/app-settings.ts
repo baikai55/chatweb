@@ -13,6 +13,18 @@ const STORAGE_KEY = "chatweb:settings";
 export const SUBMIT_MODES = ["enter", "ctrl-enter"] as const;
 export type SubmitMode = (typeof SUBMIT_MODES)[number];
 
+/**
+ * 图片生成的等待上限（秒）。
+ *
+ * 默认 300 而不是 SSE 那边通用的 90 —— 图片生成本来就慢（实测 `gpt-image-2`
+ * 单张 68 秒，`quality:"high"` 到 103 秒），而且 CPA 会在上游失败时换一家重试，
+ * 使用日志里能看到「HTTP 499 context canceled」后面紧跟一条成功记录，
+ * 两次加起来的静默时间轻松超过 90 秒。做成可调是因为这个数字完全取决于
+ * 你接的是哪家上游，写死多少都会冤枉一部分人。
+ */
+export const IMAGE_TIMEOUT_MIN_SECONDS = 30;
+export const IMAGE_TIMEOUT_MAX_SECONDS = 1800;
+
 export const appSettingsSchema = z.object({
   /**
    * Enter 直接发，还是 Ctrl/⌘+Enter 发。
@@ -23,6 +35,12 @@ export const appSettingsSchema = z.object({
   clearInputAfterSubmit: z.boolean().default(false),
   /** 长任务完成时发系统通知 */
   notifyOnComplete: z.boolean().default(false),
+  /** 图片生成等多久算卡死。见上面的常量注释。 */
+  imageTimeoutSeconds: z.number()
+    .int()
+    .min(IMAGE_TIMEOUT_MIN_SECONDS)
+    .max(IMAGE_TIMEOUT_MAX_SECONDS)
+    .default(300),
 });
 
 export type AppSettings = z.infer<typeof appSettingsSchema>;

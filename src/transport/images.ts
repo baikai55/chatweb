@@ -27,6 +27,8 @@ export type GenerateImagesOptions = {
   aspectRatio?: string;
   quality?: string;
   responseFormat: ImageResponseFormat;
+  /** 上游多久没吐字节算卡死。由设置页的「图片等待上限」给，默认 300 秒。 */
+  idleTimeoutMs?: number;
   signal?: AbortSignal;
   /** SSE 每返回一张完成图就通知 UI；不会把 partial_image 预览混进最终结果。 */
   onUpdate?: (images: ImageResult[]) => void;
@@ -82,7 +84,7 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
   const extract = extractorFor(route);
   const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
   if (contentType.includes("text/event-stream")) {
-    return consumeImageStream(response, options.backend.baseURL, extract, options.onUpdate);
+    return consumeImageStream(response, options.backend.baseURL, extract, options.onUpdate, options.idleTimeoutMs);
   }
 
   const responseText = await response.text();
@@ -155,16 +157,28 @@ function extractByPaths(payload: unknown, baseURL: string, route: ResolvedImageR
   return images;
 }
 
+/**
+ * 图片流的静默超时默认比通用的 90 秒宽得多。
+ *
+ * 实测生成本来就慢（`gpt-image-2` 单张 68 秒，`quality:"high"` 到 103 秒），
+ * 而且 CPA 会在上游失败时自己换一家重试 —— 使用日志里看得到
+ * 「HTTP 499 context canceled」后面紧跟一条成功记录，那是 CPA 取消了
+ * 第一家上游又打了第二家，两次加起来的静默时间轻松超过 90 秒。
+ * 具体多少合适取决于你接的是哪家上游，所以做成了设置项。
+ */
+const DEFAULT_IMAGE_IDLE_TIMEOUT_MS = 300_000;
+
 async function consumeImageStream(
   response: Response,
   baseURL: string,
   extract: ImageExtractor,
   onUpdate?: (images: ImageResult[]) => void,
+  idleTimeoutMs = DEFAULT_IMAGE_IDLE_TIMEOUT_MS,
 ): Promise<ImageResult[]> {
   const images: ImageResult[] = [];
   const seen = new Set<string>();
 
-  for await (const frame of readSSE(response)) {
+  for await (const frame of readSSE(response, { idleTimeoutMs })) {
     if (frame.data.trim() === "[DONE]") break;
     const payload = parseJSON(frame.data);
     throwForPayloadError(response, frame, payload);

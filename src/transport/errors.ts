@@ -100,11 +100,21 @@ function annotate(status: number, message: string, rawBody: string): string {
   if (haystack.includes("unsafe_example_api_key")) {
     return `${message}\n\n这是服务端配置问题，不是你的 key 有问题：CPA 的 config.yaml 里 api-keys 还是示例模板值（如 your-api-key-1），触发了安全模式，所有 /v1 路径都被拦截。需要在 CPA 侧填入真实的 key 并重载。`;
   }
+  /*
+    只有用户手动开了联网搜索时我们才会发 tools，所以 400 的报文里出现
+    web_search 一定是那个开关引起的。实测 CPA 转发给 oneapi 上的第三方
+    DeepSeek 会回：unknown variant `web_search`, expected `function`。
+    原始报文里全是 "deserialize the JSON body into the target type"
+    这种词，指不回"是我点了那个按钮"。
+  */
+  if (status === 400 && haystack.includes("web_search")) {
+    return `${message}\n\n这个上游只认 type=function 的工具，用不了内置的联网搜索。把工具栏里的「联网」关掉再发一次就行。Gemini 和 Grok 的模型不受影响（实测 CPA 上的 Grok 可以正常搜）。`;
+  }
   if (status === 401) {
     return `${message}\n\nkey 没通过验证。检查设置里的 API Key 是否正确，以及后端是否已经重载了新加的 key。`;
   }
   if (status === 404) {
-    return `${message}\n\n这个后端没有这个端点。可能是能力探测的结果过期了，去设置里重新探测一次。`;
+    return `${message}\n\n这个后端没有这个端点 —— 不是每个后端都有全套端点（实测 CPA 的 /tts、/stt 就全是 404）。用不了的面板可以去设置页的「显示哪些面板」里取消勾选。`;
   }
   if (status === 429) {
     return `${message}\n\n上游限流了，等一会儿再试。`;
