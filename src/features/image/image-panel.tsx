@@ -20,7 +20,9 @@ import {
   generateImages,
   type ImageResponseFormat,
 } from "@/transport/images";
+import { imageRouteFor, routeVariables } from "@/transport/image-routes";
 import { isAbortError } from "@/transport/errors";
+import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import type { ImageResult } from "@/transport/types";
 
 type DimensionMode = "size" | "aspect_ratio";
@@ -79,10 +81,24 @@ export function ImagePanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const settings = useAppSettings();
 
   const model = imageModels.some((item) => item.id === selectedModel)
     ? selectedModel
     : imageModels[0]?.id ?? "";
+
+  /**
+   * 这条模型走的路由到底会发哪些参数。
+   * 走 chat/completions 时尺寸、质量、返回格式根本不会被发出去，
+   * 还把控件摆在那里就是骗人。
+   */
+  const routeVars = useMemo(
+    () => (model ? routeVariables(imageRouteFor(backend, model)) : new Set<string>()),
+    [backend, model],
+  );
+  const canSize = routeVars.has("size");
+  const canAspect = routeVars.has("aspectRatio");
+  const effectiveDimension: DimensionMode = canSize && canAspect ? dimensionMode : canSize ? "size" : "aspect_ratio";
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -99,6 +115,7 @@ export function ImagePanel({
     setPending(true);
     setError("");
     setImages([]);
+    if (settings.clearInputAfterSubmit) setPrompt("");
 
     try {
       const result = await generateImages({
@@ -106,13 +123,14 @@ export function ImagePanel({
         model,
         prompt: text,
         n: Number(count),
-        ...(dimensionMode === "size" ? { size } : { aspectRatio }),
+        ...(effectiveDimension === "size" ? { size } : { aspectRatio }),
         ...(quality === "default" ? {} : { quality }),
         responseFormat,
         signal: controller.signal,
         onUpdate: setImages,
       });
       setImages(result);
+      notifyTaskDone("图片生成完成", `${result.length} 张 · ${model}`);
     } catch (caught) {
       if (!isAbortError(caught)) {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -131,7 +149,7 @@ export function ImagePanel({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+    if (shouldSubmitOnKey(event, settings.submitMode)) {
       event.preventDefault();
       void startGeneration();
     }
@@ -191,22 +209,26 @@ export function ImagePanel({
 
           <div className="flex flex-wrap items-end justify-between gap-2 px-3 pb-3">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <CompactSelect
-                value={count}
-                options={COUNTS}
-                onChange={setCount}
-                ariaLabel="生成数量"
-                disabled={pending}
-                icon={<Images className="size-3.5" />}
-              />
-              <CompactSelect
-                value={dimensionMode}
-                options={DIMENSION_MODES}
-                onChange={setDimensionMode}
-                ariaLabel="尺寸参数类型"
-                disabled={pending}
-              />
-              {dimensionMode === "size" ? (
+              {routeVars.has("n") ? (
+                <CompactSelect
+                  value={count}
+                  options={COUNTS}
+                  onChange={setCount}
+                  ariaLabel="生成数量"
+                  disabled={pending}
+                  icon={<Images className="size-3.5" />}
+                />
+              ) : null}
+              {canSize && canAspect ? (
+                <CompactSelect
+                  value={dimensionMode}
+                  options={DIMENSION_MODES}
+                  onChange={setDimensionMode}
+                  ariaLabel="尺寸参数类型"
+                  disabled={pending}
+                />
+              ) : null}
+              {effectiveDimension === "size" && canSize ? (
                 <CompactSelect
                   value={size}
                   options={SIZES.map((value) => ({ value, label: value }))}
@@ -214,7 +236,8 @@ export function ImagePanel({
                   ariaLabel="图片尺寸"
                   disabled={pending}
                 />
-              ) : (
+              ) : null}
+              {effectiveDimension === "aspect_ratio" && canAspect ? (
                 <CompactSelect
                   value={aspectRatio}
                   options={ASPECT_RATIOS.map((value) => ({ value, label: value }))}
@@ -222,21 +245,25 @@ export function ImagePanel({
                   ariaLabel="图片比例"
                   disabled={pending}
                 />
-              )}
-              <CompactSelect
-                value={quality}
-                options={QUALITIES}
-                onChange={setQuality}
-                ariaLabel="图片质量"
-                disabled={pending}
-              />
-              <CompactSelect
-                value={responseFormat}
-                options={RESPONSE_FORMATS}
-                onChange={setResponseFormat}
-                ariaLabel="返回格式"
-                disabled={pending}
-              />
+              ) : null}
+              {routeVars.has("quality") ? (
+                <CompactSelect
+                  value={quality}
+                  options={QUALITIES}
+                  onChange={setQuality}
+                  ariaLabel="图片质量"
+                  disabled={pending}
+                />
+              ) : null}
+              {routeVars.has("responseFormat") ? (
+                <CompactSelect
+                  value={responseFormat}
+                  options={RESPONSE_FORMATS}
+                  onChange={setResponseFormat}
+                  ariaLabel="返回格式"
+                  disabled={pending}
+                />
+              ) : null}
             </div>
 
             {pending ? (

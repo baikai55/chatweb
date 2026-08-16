@@ -1,5 +1,9 @@
 import type { Backend } from "@/backends/types";
-import { joinURL } from "@/transport/chat-completions";
+import {
+  resolveImageRoute,
+  selectByPath,
+  type ResolvedImageRoute,
+} from "@/transport/image-routes";
 import {
   TransportError,
   firstString,
@@ -31,9 +35,13 @@ export type GenerateImagesOptions = {
 /**
  * OpenAI 兼容的图片生成适配器。
  *
- * CPA 的图片端点可能返回普通 JSON，也可能在 stream 模式下返回 SSE；第三方兼容
- * 后端还会把标准 data 数组包在 result / response / output 等层级里。这里统一收敛成
- * 只含可直接展示 URL（远程 URL 或 data URL）的 ImageResult[]。
+ * 具体打哪个端点、请求体长什么样，由后端配置的图片路由决定
+ * （见 `src/transport/image-routes.ts`）—— 有的模型只认 `/images/generations`，
+ * 有的只认 `chat/completions`，这个差异从模型 id 推断不出来。
+ *
+ * 响应侧无论走哪条路由都一样处理：可能是普通 JSON，可能是 SSE，也可能是
+ * text/plain 里塞了 SSE 帧；标准 data 数组还常被包在 result / response / output
+ * 等层级里。这里统一收敛成只含可直接展示 URL（远程 URL 或 data URL）的 ImageResult[]。
  */
 export async function generateImages(options: GenerateImagesOptions): Promise<ImageResult[]> {
   const model = options.model.trim();
@@ -44,31 +52,26 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     throw new TransportError(0, "生成数量必须是 1 到 10 之间的整数", "invalid_request");
   }
 
-  const body: Record<string, unknown> = {
+  const route = resolveImageRoute(options.backend, {
     model,
     prompt,
     n: options.n,
-    response_format: options.responseFormat,
-  };
-  const size = options.size?.trim();
-  const aspectRatio = options.aspectRatio?.trim();
-  const quality = options.quality?.trim();
-  if (size) body.size = size;
-  else if (aspectRatio) body.aspect_ratio = aspectRatio;
-  if (quality) body.quality = quality;
-
-  const headers = new Headers({
-    Accept: "application/json, text/event-stream",
-    "Content-Type": "application/json",
+    size: options.size,
+    aspectRatio: options.aspectRatio,
+    quality: options.quality,
+    responseFormat: options.responseFormat,
   });
+
+  const headers = new Headers({ Accept: "application/json, text/event-stream" });
+  if (route.body !== null) headers.set("Content-Type", "application/json");
   if (options.backend.apiKey) {
     headers.set("Authorization", `Bearer ${options.backend.apiKey}`);
   }
 
-  const response = await fetch(joinURL(options.backend.baseURL, "/images/generations"), {
-    method: "POST",
+  const response = await fetch(route.url, {
+    method: route.method,
     headers,
-    body: JSON.stringify(body),
+    body: route.body,
     signal: options.signal,
   });
 
@@ -76,34 +79,86 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     throw toTransportError(response, await response.text());
   }
 
+  const extract = extractorFor(route);
   const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
   if (contentType.includes("text/event-stream")) {
-    return consumeImageStream(response, options.backend.baseURL, options.onUpdate);
+    return consumeImageStream(response, options.backend.baseURL, extract, options.onUpdate);
   }
 
   const responseText = await response.text();
   const frames = readBufferedFrames(responseText);
   if (frames.length > 0) {
-    return consumeBufferedFrames(response, frames, options.backend.baseURL, options.onUpdate);
+    return consumeBufferedFrames(response, frames, options.backend.baseURL, extract, options.onUpdate);
   }
 
   const payload = parseJSON(responseText);
   if (payload !== null) {
     throwForPayloadError(response, undefined, payload);
-    const images = readImages(payload, options.backend.baseURL);
+    const images = extract(payload, options.backend.baseURL);
     if (images.length > 0) return images;
   } else {
     // 极少数兼容层直接把一条图片 URL 作为纯文本返回。
-    const images = readImages(responseText.trim(), options.backend.baseURL);
+    const images = readImagesDeep(responseText.trim(), options.backend.baseURL);
     if (images.length > 0) return images;
   }
 
   throw new TransportError(response.status, "上游没有返回任何可显示的图片", "empty_response");
 }
 
+type ImageExtractor = (payload: unknown, baseURL: string) => ImageResult[];
+
+/**
+ * 路由填了取图路径就按路径取，没填就用通用深度提取。
+ *
+ * 路径取空时回落到深度提取 —— 路径写错一个字就什么都拿不到，
+ * 而"上游没返回图片"这个报错完全指不到是配置写错了。
+ */
+function extractorFor(route: ResolvedImageRoute): ImageExtractor {
+  if (route.imageUrlPaths.length === 0 && route.b64JsonPaths.length === 0) {
+    return readImagesDeep;
+  }
+  return (payload, baseURL) => {
+    const byPath = extractByPaths(payload, baseURL, route);
+    return byPath.length > 0 ? byPath : readImagesDeep(payload, baseURL);
+  };
+}
+
+function extractByPaths(payload: unknown, baseURL: string, route: ResolvedImageRoute): ImageResult[] {
+  const images: ImageResult[] = [];
+  const seen = new Set<string>();
+
+  const push = (url: string): void => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    images.push({ url });
+  };
+
+  for (const path of route.imageUrlPaths) {
+    for (const value of selectByPath(payload, path)) {
+      if (typeof value === "string" && value.trim()) {
+        push(resolveImageURL(value.trim(), baseURL));
+      } else if (isRecord(value)) {
+        const nested = firstString(value.url, value.uri);
+        if (nested) push(resolveImageURL(nested, baseURL));
+      }
+    }
+  }
+
+  for (const path of route.b64JsonPaths) {
+    for (const value of selectByPath(payload, path)) {
+      if (typeof value === "string" && value.trim()) {
+        push(toImageDataURL(value.trim(), "image/png"));
+      }
+    }
+  }
+
+  return images;
+}
+
 async function consumeImageStream(
   response: Response,
   baseURL: string,
+  extract: ImageExtractor,
   onUpdate?: (images: ImageResult[]) => void,
 ): Promise<ImageResult[]> {
   const images: ImageResult[] = [];
@@ -114,7 +169,7 @@ async function consumeImageStream(
     const payload = parseJSON(frame.data);
     throwForPayloadError(response, frame, payload);
     if (payload === null || isPartialFrame(frame, payload)) continue;
-    appendUnique(images, seen, readImages(payload, baseURL));
+    appendUnique(images, seen, extract(payload, baseURL));
     if (images.length > 0) onUpdate?.([...images]);
   }
 
@@ -128,6 +183,7 @@ function consumeBufferedFrames(
   response: Response,
   frames: SSEFrame[],
   baseURL: string,
+  extract: ImageExtractor,
   onUpdate?: (images: ImageResult[]) => void,
 ): ImageResult[] {
   const images: ImageResult[] = [];
@@ -138,7 +194,7 @@ function consumeBufferedFrames(
     const payload = parseJSON(frame.data);
     throwForPayloadError(response, frame, payload);
     if (payload === null || isPartialFrame(frame, payload)) continue;
-    appendUnique(images, seen, readImages(payload, baseURL));
+    appendUnique(images, seen, extract(payload, baseURL));
     if (images.length > 0) onUpdate?.([...images]);
   }
 
@@ -274,6 +330,70 @@ export function readImages(payload: unknown, baseURL: string): ImageResult[] {
 
   visit(payload, "root", 0);
   return images;
+}
+
+/**
+ * 通用提取：结构化提取 + 正文里的 markdown 图片。
+ *
+ * 走 chat/completions 生图时，图片经常不在任何结构化字段里，而是
+ * 拼在回复正文里的 `![](https://…)`。`readImages` 只认字段，扫不到这种。
+ */
+export function readImagesDeep(payload: unknown, baseURL: string): ImageResult[] {
+  const images = readImages(payload, baseURL);
+  const seen = new Set(images.map((image) => image.url));
+
+  for (const text of collectText(payload)) {
+    for (const url of readImageURLsFromText(text)) {
+      const normalized = resolveImageURL(url, baseURL);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      images.push({ url: normalized });
+    }
+  }
+
+  return images;
+}
+
+/** 只扫这几个键下的字符串，免得把错误信息里的 URL 也当成图片。 */
+const TEXT_KEYS = new Set(["content", "text", "output_text", "markdown"]);
+
+function collectText(payload: unknown): string[] {
+  const out: string[] = [];
+  const seen = new WeakSet<object>();
+
+  const visit = (value: unknown, key: string, depth: number): void => {
+    if (depth > 10) return;
+    if (typeof value === "string") {
+      if (TEXT_KEYS.has(key) && value.trim()) out.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key, depth + 1);
+      return;
+    }
+    if (!isRecord(value) || seen.has(value)) return;
+    seen.add(value);
+    for (const [childKey, child] of Object.entries(value)) visit(child, childKey, depth + 1);
+  };
+
+  visit(payload, "root", 0);
+  return out;
+}
+
+const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)/g;
+const DATA_IMAGE_URL = /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+// 裸 URL 只收有图片扩展名的 —— 没扩展名的链接扫进来误报太多
+const BARE_IMAGE_URL = /https?:\/\/[^\s<>"')\]]+\.(?:png|jpe?g|webp|gif|avif)(?:\?[^\s<>"')\]]*)?/gi;
+
+function readImageURLsFromText(text: string): string[] {
+  const urls: string[] = [];
+  for (const pattern of [MARKDOWN_IMAGE, DATA_IMAGE_URL, BARE_IMAGE_URL]) {
+    for (const match of text.matchAll(pattern)) {
+      const url = (match[1] ?? match[0]).trim();
+      if (url) urls.push(url);
+    }
+  }
+  return urls;
 }
 
 const URL_KEYS = ["url", "uri", "image_url", "imageUrl"] as const;

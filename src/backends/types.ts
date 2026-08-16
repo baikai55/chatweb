@@ -22,6 +22,43 @@ export type BackendMode = (typeof BACKEND_MODES)[number];
 export const MODEL_KINDS = ["auto", "chat", "image", "video", "tts", "stt", "hidden"] as const;
 export type ModelKind = (typeof MODEL_KINDS)[number];
 
+/**
+ * 图片模型走哪条请求路线。
+ *
+ * 光靠分类判断不出来 —— 实测 CPA 上 Nano Banana 确实是图片模型，
+ * 但它明确拒绝 `/images/generations`，只能走 chat/completions；
+ * grok2api 的生图也支持 chat 格式。所以路线得能单独指定。
+ */
+export const BUILTIN_IMAGE_ROUTES = ["images", "chat"] as const;
+export type BuiltinImageRoute = (typeof BUILTIN_IMAGE_ROUTES)[number];
+
+/**
+ * 自定义图片路由：把请求体和取图路径都交给用户描述。
+ *
+ * 设计对齐 gpt-image-playground 的 custom provider：
+ *   - body 是模板，字符串以 `$` 开头表示从上下文取值（`$prompt`、`$params.size`），
+ *     其余按字面量发送。取不到值的键会被剪掉，可选参数不用写条件分支。
+ *   - imageUrlPaths / b64JsonPaths 是点号路径，`*` 展开数组
+ *     （例如 `choices.*.message.images.*.url`）。
+ *   - 两个路径都留空时回落到通用深度提取，多数后端不用填。
+ *
+ * 暂不支持异步任务轮询 —— 目前接触到的图片端点都是同步返回的，
+ * 真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
+ */
+export const customImageRouteSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /** 相对 baseURL 的路径，例如 chat/completions */
+  path: z.string().min(1),
+  method: z.enum(["POST", "GET"]).default("POST"),
+  query: z.record(z.string(), z.string()).default({}),
+  body: z.record(z.string(), z.unknown()).default({}),
+  imageUrlPaths: z.array(z.string()).default([]),
+  b64JsonPaths: z.array(z.string()).default([]),
+});
+
+export type CustomImageRoute = z.infer<typeof customImageRouteSchema>;
+
 export const backendSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -40,10 +77,17 @@ export const backendSchema = z.object({
   modelOverrides: z.record(z.string(), z.enum(MODEL_KINDS)).default({}),
   /**
    * 用户勾选保存的模型 id，按数组顺序显示。
-   * 聊天时的模型选择器默认只显示这些 —— CPA 一个部署就有 65 个模型，
-   * 全列出来根本没法选。为空时降级成显示全部，保证开箱可用。
+   * 聊天时的模型选择器只显示这些 —— CPA 一个部署就有 68 个模型，
+   * 全列出来根本没法选。一个都没保存时给提示引导去设置页，
+   * **不做「降级显示全部」** —— 那样分不清这一长串是自己选的还是系统兜底的。
    */
   savedModels: z.array(z.string()).default([]),
+  /** 用户定义的图片路由 */
+  customImageRoutes: z.array(customImageRouteSchema).default([]),
+  /** 模型 id → 路由 id（内置 images / chat，或某条自定义路由的 id） */
+  imageRouteOverrides: z.record(z.string(), z.string()).default({}),
+  /** 没有单独指定路由的图片模型默认走哪条 */
+  defaultImageRoute: z.string().default("images"),
 });
 
 export type Backend = z.infer<typeof backendSchema>;
@@ -84,5 +128,8 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     probedAt: input.probedAt ?? null,
     modelOverrides: input.modelOverrides ?? {},
     savedModels: input.savedModels ?? [],
+    customImageRoutes: input.customImageRoutes ?? [],
+    imageRouteOverrides: input.imageRouteOverrides ?? {},
+    defaultImageRoute: input.defaultImageRoute ?? "images",
   });
 }

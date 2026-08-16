@@ -22,6 +22,7 @@ import type { ChatStreamSnapshot, ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
+import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
 
 const REASONING_LEVELS: ReasoningEffort[] = ["auto", "none", "low", "medium", "high", "xhigh"];
@@ -44,6 +45,7 @@ export function ChatPanel({
   const [streaming, setStreaming] = useState<ChatStreamSnapshot | null>(null);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const settings = useAppSettings();
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
@@ -87,6 +89,7 @@ export function ChatPanel({
         }],
         updatedAt: Date.now(),
       });
+      notifyTaskDone("回复完成", result.text.slice(0, 120) || base.model);
     } catch (caught) {
       // 用户主动停止不算错误，但已经流出来的内容要保留下来
       if (isAbortError(caught)) {
@@ -127,8 +130,8 @@ export function ChatPanel({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    // 回车发送，Shift+回车换行。输入法组合中不拦（中文输入按回车是选词）。
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+    // 具体哪个键发送看设置页；输入法组合中的回车一律不拦（中文输入按回车是选词）。
+    if (shouldSubmitOnKey(event, settings.submitMode)) {
       event.preventDefault();
       submit(event as unknown as FormEvent);
     }

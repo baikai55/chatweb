@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { ModelPicker } from "@/features/console/model-picker";
 import { cn } from "@/shared/lib/cn";
+import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
 import {
   createVideoGeneration,
@@ -85,6 +86,7 @@ export function VideoPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runSequenceRef = useRef(0);
+  const settings = useAppSettings();
 
   const busy = run.phase === "uploading" || run.phase === "submitting" || run.phase === "polling";
   const canSubmit = Boolean(prompt.trim() && model && (operation === "generate" || sourceFile));
@@ -137,6 +139,10 @@ export function VideoPanel({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    startTask();
+  }
+
+  function startTask() {
     const text = prompt.trim();
     if (busy || !model) return;
     if (!text) {
@@ -148,6 +154,7 @@ export function VideoPanel({
       return;
     }
     setFormError("");
+    if (settings.clearInputAfterSubmit) setPrompt("");
     void runVideoTask(text);
   }
 
@@ -211,6 +218,9 @@ export function VideoPanel({
         signal: controller.signal,
       });
       update(runStateFromStatus(finalStatus, job.requestId));
+      if (finalStatus.status === "done") {
+        notifyTaskDone("视频生成完成", `${operationLabel(operation)} · ${model}`);
+      }
     } catch (caught) {
       if (controller.signal.aborted || isAbortError(caught)) {
         update((current) => ({ ...current, phase: "cancelled", error: undefined }));
@@ -273,6 +283,11 @@ export function VideoPanel({
           <Textarea
             value={prompt}
             onChange={(event) => { setPrompt(event.target.value); if (formError) setFormError(""); }}
+            onKeyDown={(event) => {
+              if (!shouldSubmitOnKey(event, settings.submitMode)) return;
+              event.preventDefault();
+              startTask();
+            }}
             placeholder={videoModels.length === 0 ? "先去设置里保存视频模型" : promptPlaceholder(operation)}
             rows={3}
             disabled={videoModels.length === 0 || busy}

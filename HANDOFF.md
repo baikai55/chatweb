@@ -25,6 +25,9 @@
 | 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 参数控制、URL/Base64、流式兼容、预览与下载 |
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
 | 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写 |
+| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、能力手勾、模型归类覆盖、图片路由、行为设置 |
+| 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
+| 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知 |
 | Worker | `worker/*.ts` | ✅ R2 上传往返字节一致、路径穿越已挡、CSP 已下发 |
 
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
@@ -33,7 +36,59 @@
 本轮再次运行过 `pnpm check` 和 `pnpm build`，均通过。Vite 仅提示主包超过
 500 KB，不影响构建产物。
 
-## 本轮（用真实 key 实测后端）
+## 本轮（设置页重做 + 图片路由）
+
+用户点名要借鉴 `gpt-image-playground`，选了四块全做。都做完了，`pnpm check`、
+`pnpm build`、`pnpm test` 干净。设置页从 `app.tsx` 里搬进
+`src/features/settings/settings-view.tsx`，拆成四个标签页。
+
+**1. 后端可编辑**：名称 / 地址 / 密钥就地改，有「还原」；能力五个 chip 可手动勾；
+「重新探测」按钮。探测那段说明里写明了**别反复点**（会被当测活），
+未保存的改动会禁用探测按钮，免得探的是旧地址。
+
+**2. 图片路由**（核心）—— `src/transport/image-routes.ts`：
+
+同一个图片模型在不同后端认的端点不一样（CPA 上 Nano Banana 拒绝
+`/images/generations`），这事从模型 id 看不出来，所以做成可配路由：
+
+- 内置 `images`（`/images/generations`）和 `chat`（`/chat/completions`），
+  **两条本身就是用 `CustomImageRoute` 描述的** —— 执行代码只有一套，
+  用户写自定义路由时也就有了现成例子可抄（设置页有「复制改」按钮）。
+- 请求体是模板：整串 `"$prompt"` 按原类型替换，**取不到值的键整个剪掉**，
+  可选参数因此不用写条件分支；串内 `${prompt}` 按字符串插值。
+  `size` 有值时自动丢掉 `aspectRatio`（一起发多数后端报冲突），
+  这个取舍做在 `toTemplateValues` 里，模板不用表达"二选一"。
+- 取图路径 `imageUrlPaths` / `b64JsonPaths`：点号分隔、`*` 展开数组。
+  **留空就用通用提取，填了但没命中也回落到通用提取** —— 路径写错一个字
+  就什么都拿不到，而"上游没返回图片"这个报错完全指不到是配置写错了。
+- `routeVariables()` 反推模板真正引用了哪些变量，**面板据此隐藏用不上的控件**。
+  走 chat 路由时尺寸/质量/返回格式直接不显示 —— 摆在那里但不会被发出去就是骗人。
+- 通用提取新增 `readImagesDeep()`：在原 `readImages()` 之外还扫正文里的
+  `![](url)`、裸图片链接和 data URL。走 chat/completions 生图时图片经常只在
+  正文 markdown 里，原来的字段扫描扫不到。裸链接只认带图片扩展名的，
+  且只扫 `content`/`text`/`output_text`/`markdown` 这几个键 ——
+  否则错误信息里的链接也会被当成图片。
+
+**3. 模型归类覆盖**：勾选保存后的模型行下面多一行控件，归类下拉（`auto` 表示
+用推断结果）+ 图片模型额外一个路由下拉。只对已保存的模型显示 —— 没保存的模型
+改归类没有意义，68 行全塞控件也没法看。被覆盖过的 kind 徽章会变色。
+
+**4. 行为设置** —— `src/shared/settings/app-settings.ts`（localStorage + zod，
+和 backend-store 同一套路）：提交方式、提交后清空输入框、任务完成通知。
+`shouldSubmitOnKey()` 统一四个面板的键盘判定；`enter` 档下 Ctrl/⌘+Enter 也照发，
+这一档只是"多一种发送方式"，不该把另一种惯用手势变成哑键。默认 `enter` ——
+聊天是主界面，回车发送是那里的通行约定，这样老行为不变。
+通知只在 `document.hidden` 时发（人盯着看的时候再弹纯属打扰），
+开关前先要权限，拿不到就不拨过去。
+
+顺手修了一个真 bug：模型缓存只按 `backend.id` 存，**改了 baseURL 还会命中旧缓存**
+（24 小时 TTL）。缓存记录现在带 `baseURL`，不匹配就重拉。
+
+**测试**：装了 vitest，`pnpm test`。31 个用例覆盖模板展开、路由选择与回落、
+`routeVariables`、`selectByPath`、以及各种响应形状的取图（含 markdown 正文、
+去重、错误信息里的链接不误报）。这些都是纯函数，不打网络。
+
+## 上一轮（用真实 key 实测后端）
 
 两个后端的 key 都验证可用。实测发现并修掉了三个语音的真 bug —— 都是「UI 允许但
 上游拒绝」，不实跑发现不了：
@@ -61,10 +116,18 @@
    （本地没法验，必须真部署一次。）
 2. 检查三个媒体面板的移动端布局、暗色模式、取消操作和错误状态。
    代码层面读过一遍没发现问题，但没有真机/窄视口实测过。
-3. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
-4. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
+   **本轮新增的设置页四个标签页也在此列** —— 标签栏在窄屏是否需要横向滚动没实测。
+3. **图片路由只做过单测，没打过真后端**。特别是这两条：
+   - CPA 上把 Nano Banana 的路由切成 `chat`，看能不能真出图、图片在响应的哪个位置
+     （通用提取够不够，还是得填 `imageUrlPaths`）。
+   - grok2api 走 `chat` 路由生图。用户说它支持这个格式，但没验过响应形状。
+   验的时候记住下面那条红线，一次一个请求，不要扫参数。
+4. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
+5. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
    CPA 的 `/responses` 和 `/messages` 都确认存在（无鉴权 401、带 key 400），
    要做的话有端点可打。目前只实现了 chat/completions。
+6. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
+   真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
 
 ## ⚠️ 联调时的红线
 
@@ -81,12 +144,12 @@
 - **模型不做「没保存就显示全部」的降级** —— 用户明确否决过。一个都没保存时
   给提示并引导去设置页。
 - 值得借鉴：`https://github.com/baikai55/gpt-image-playground`（已设为 public，TypeScript，
-  142 个文件）。用户说它的设置页功能齐全。重点看这几个文件：
-  `src/lib/apiProfiles.ts`（914 行，多 API 配置档案的数据模型，跟本项目的
-  backend-store 是同类东西）、`src/components/settings/GeneralSettingsTab.tsx`、
-  `src/components/settings/ModelPicker.tsx`、`src/lib/openaiCompatibleImageApi.ts`
-  （生图的 OpenAI 兼容层，做生图面板时直接对照）、`src/lib/db.ts`（IndexedDB 用法）。
-  **我只看到文件清单，没读过内容**，别当成已经借鉴过了。
+  142 个文件）。用户说它的设置页功能齐全。**本轮已借鉴**：custom provider 的
+  `$` 模板 + 点号取图路径设计进了 `image-routes.ts`；`GeneralSettingsTab` 的
+  「标签 + 控件 + 说明」行式布局进了行为设置页。参考源码临时下载在 `.ref/`
+  （已 gitignore，只有四个文件：`types.ts`、`openaiCompatibleImageApi.ts`、
+  `GeneralSettingsTab.tsx`、`ModelPicker.tsx`）。还没读过的：
+  `src/lib/apiProfiles.ts`（914 行，多 API 配置档案的数据模型）、`src/lib/db.ts`。
 
 ## 联调需要的东西（不在仓库里）
 

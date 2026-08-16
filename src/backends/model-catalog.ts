@@ -35,6 +35,8 @@ export type CatalogModel = {
 type CachedCatalog = {
   backendId: string;
   fetchedAt: number;
+  /** 缓存时的地址。用户改了地址就得重拉，旧记录没这个字段也一样重拉 */
+  baseURL?: string;
   /** 只缓存从网络拿到的原始信息，saved / kind 这些依赖当前配置的字段每次重算 */
   rows: Array<{ id: string; ownedBy: string; displayName?: string; contextWindow?: number }>;
 };
@@ -53,11 +55,13 @@ export async function fetchModels(
   options: { force?: boolean; signal?: AbortSignal } = {},
 ): Promise<CatalogModel[]> {
   const cached = options.force ? undefined : await readCache(backend.id);
-  const fresh = cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS;
+  const fresh = cached
+    && cached.baseURL === backend.baseURL
+    && Date.now() - cached.fetchedAt < CACHE_TTL_MS;
 
   const rows = fresh && cached ? cached.rows : await fetchFromNetwork(backend, options.signal);
   if (!fresh) {
-    void writeCache({ backendId: backend.id, fetchedAt: Date.now(), rows });
+    void writeCache({ backendId: backend.id, fetchedAt: Date.now(), baseURL: backend.baseURL, rows });
   }
   return decorate(rows, backend);
 }

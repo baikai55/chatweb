@@ -4,6 +4,9 @@ dist/
 node_modules/.tmp/
 *.tsbuildinfo
 
+# 临时下载的参考项目源码，只在开发时对照用
+.ref/
+
 # 本地密钥，绝不提交
 .dev.vars
 .env
