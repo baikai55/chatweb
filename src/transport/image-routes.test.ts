@@ -4,6 +4,7 @@ import { createBackend, type Backend, type CustomImageRoute } from "@/backends/t
 import {
   BUILTIN_ROUTE_DEFS,
   imageRouteFor,
+  imageRouteSupportsInputImages,
   resolveImageRoute,
   resolveTemplate,
   routeVariables,
@@ -91,6 +92,26 @@ describe("resolveImageRoute", () => {
     });
   });
 
+  it("内置对话路由带参考图时发送多模态 content", () => {
+    const route = resolveImageRoute(backend({ defaultImageRoute: "chat" }), {
+      ...CONTEXT,
+      model: "nano-banana",
+      inputImages: ["data:image/png;base64,aGVsbG8=", "https://cdn.test/reference.jpg"],
+    });
+    expect(JSON.parse(route.body ?? "")).toEqual({
+      model: "nano-banana",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "一只猫" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" } },
+          { type: "image_url", image_url: { url: "https://cdn.test/reference.jpg", detail: "auto" } },
+        ],
+      }],
+      stream: false,
+    });
+  });
+
   it("按模型指定的路由优先于默认路由", () => {
     const configured = backend({
       defaultImageRoute: "images",
@@ -157,16 +178,30 @@ describe("routeVariables", () => {
     );
   });
 
-  it("对话端点只用到模型和提示词 —— 面板据此隐藏其余控件", () => {
-    expect([...routeVariables(BUILTIN_ROUTE_DEFS.chat)].sort()).toEqual(["model", "prompt"]);
+  it("对话端点只用到模型和多模态消息 —— 面板据此隐藏其余控件", () => {
+    expect([...routeVariables(BUILTIN_ROUTE_DEFS.chat)].sort()).toEqual(["messageContent", "model"]);
   });
 
   it("下划线写法归一到驼峰", () => {
     const custom: CustomImageRoute = {
       ...BUILTIN_ROUTE_DEFS.chat,
-      body: { ratio: "$aspect_ratio", fmt: "${response_format}" },
+      body: { ratio: "$aspect_ratio", fmt: "${response_format}", images: "$input_images" },
     };
-    expect([...routeVariables(custom)].sort()).toEqual(["aspectRatio", "responseFormat"]);
+    expect([...routeVariables(custom)].sort()).toEqual(["aspectRatio", "inputImages", "responseFormat"]);
+  });
+
+  it("识别内置和自定义参考图路由", () => {
+    expect(imageRouteSupportsInputImages(BUILTIN_ROUTE_DEFS.images)).toBe(true);
+    expect(imageRouteSupportsInputImages(BUILTIN_ROUTE_DEFS.chat)).toBe(true);
+    expect(imageRouteSupportsInputImages({
+      ...BUILTIN_ROUTE_DEFS.images,
+      id: "plain-json",
+    })).toBe(false);
+    expect(imageRouteSupportsInputImages({
+      ...BUILTIN_ROUTE_DEFS.chat,
+      id: "custom-vision",
+      body: { images: "$inputImages" },
+    })).toBe(true);
   });
 });
 

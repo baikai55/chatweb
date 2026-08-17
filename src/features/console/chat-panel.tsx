@@ -30,6 +30,12 @@ import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
+import {
+  IMAGE_INPUT_DATA_URL,
+  isImageInputFile,
+  readImageInputFile,
+  type ImageInputFile,
+} from "@/shared/image-input";
 
 const REASONING_LEVELS: ReasoningEffort[] = ["auto", "none", "low", "medium", "high", "xhigh"];
 
@@ -38,16 +44,7 @@ const REASONING_LEVELS: ReasoningEffort[] = ["auto", "none", "low", "medium", "h
 const MAX_CHAT_IMAGES = 4;
 const MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
-const CHAT_IMAGE_MIME = /^image\/(?:png|jpe?g|gif|webp|avif|bmp|x-ms-bmp|heic|heif)$/i;
-const CHAT_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-ms-bmp|heic|heif);base64,/i;
-
-type PendingImage = {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  dataUrl: string;
-};
+type PendingImage = ImageInputFile;
 
 type DisplayContent = {
   text: string;
@@ -70,49 +67,7 @@ function splitMessageContent(content: ChatMessageContent): DisplayContent {
 }
 
 function isSafeImageUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value) || CHAT_IMAGE_DATA_URL.test(value);
-}
-
-function isImageFile(file: File): boolean {
-  if (file.type) return CHAT_IMAGE_MIME.test(file.type);
-  return /\.(?:avif|gif|jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name);
-}
-
-function inferImageMime(file: File): string {
-  if (CHAT_IMAGE_MIME.test(file.type)) return file.type.toLowerCase();
-  const extension = /\.([^.]+)$/.exec(file.name)?.[1]?.toLowerCase();
-  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
-  if (extension === "bmp") return "image/bmp";
-  return extension ? `image/${extension}` : "";
-}
-
-function readImageFile(file: File): Promise<PendingImage> {
-  return new Promise((resolve, reject) => {
-    const mime = inferImageMime(file);
-    if (!CHAT_IMAGE_MIME.test(mime)) {
-      reject(new Error(`「${file.name || "图片"}」不是支持的图片格式`));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`读取「${file.name || "图片"}」失败`));
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === "string" ? reader.result : "";
-      if (!CHAT_IMAGE_DATA_URL.test(dataUrl)) {
-        reject(new Error(`「${file.name || "图片"}」不是可读取的图片`));
-        return;
-      }
-      resolve({
-        id: createMessageId(),
-        name: file.name || "图片",
-        type: mime,
-        size: file.size,
-        dataUrl,
-      });
-    };
-    // 少数浏览器不给 AVIF/HEIC 等扩展名补 MIME；给 Blob 切片补上，
-    // 否则 FileReader 会产出 application/octet-stream，后续无法作为视觉输入。
-    reader.readAsDataURL(file.type ? file : file.slice(0, file.size, mime));
-  });
+  return /^https?:\/\//i.test(value) || IMAGE_INPUT_DATA_URL.test(value);
 }
 
 function buildUserContent(text: string, images: PendingImage[]): ChatMessageContent {
@@ -214,7 +169,7 @@ export function ChatPanel({
     if (files.length === 0) return;
     const targetSessionId = session.id;
 
-    const imageFiles = files.filter(isImageFile);
+    const imageFiles = files.filter(isImageInputFile);
     if (imageFiles.length < files.length) {
       toast.error("只支持图片文件，其他文件已忽略");
     }
@@ -257,7 +212,7 @@ export function ChatPanel({
       bytes: reading.bytes + selectedBytes,
     };
     setReadingImages((count) => count + valid.length);
-    void Promise.allSettled(valid.map(readImageFile)).then((results) => {
+    void Promise.allSettled(valid.map((file) => readImageInputFile(file, createMessageId()))).then((results) => {
       if (currentSessionIdRef.current !== targetSessionId) return;
       const loaded = results
         .filter((result): result is PromiseFulfilledResult<PendingImage> => result.status === "fulfilled")

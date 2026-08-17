@@ -157,6 +157,7 @@ function Console({
         />
       ) : mode === "image" ? (
         <ImagePanel
+          key={backend.id}
           backend={backend}
           models={saved}
           onManage={() => setSettingsOpen(true)}

@@ -858,8 +858,11 @@ function RouteSection({
             串里的 <code className="rounded bg-secondary px-1 py-0.5 font-mono">{"${prompt}"}</code> 按字符串插值。
           </p>
           <p>
-            可用变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model prompt n size aspectRatio quality responseFormat</code>
+            可用变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model prompt messageContent inputImages n size aspectRatio quality responseFormat</code>
             （下划线写法同样认）。面板上只会显示模板真正用到的那几个参数控件。
+            参考图路由使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">messageContent</code>
+            生成 OpenAI 多模态消息，或直接使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">inputImages</code> 数组。
+            内置图片路由带参考图时会自动改用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">/images/edits</code>。
           </p>
           <p>
             <code className="rounded bg-secondary px-1 py-0.5 font-mono">imageUrlPaths</code> /

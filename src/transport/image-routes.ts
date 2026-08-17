@@ -18,6 +18,8 @@ import { isRecord } from "@/transport/errors";
 export type ImageRouteContext = {
   model: string;
   prompt: string;
+  /** 参考图 URL；浏览器上传的图片会是 data URL。 */
+  inputImages?: string[];
   n: number;
   size?: string;
   aspectRatio?: string;
@@ -53,7 +55,7 @@ export const BUILTIN_ROUTE_DEFS: Record<(typeof BUILTIN_IMAGE_ROUTES)[number], C
     query: {},
     body: {
       model: "$model",
-      messages: [{ role: "user", content: "$prompt" }],
+      messages: [{ role: "user", content: "$messageContent" }],
       // 关掉流式：走对话端点生图时图片一般在最后一条完整消息里，
       // 分片反而要自己拼，没有收益
       stream: false,
@@ -168,9 +170,23 @@ function toTemplateValues(context: ImageRouteContext): Record<string, unknown> {
   const size = context.size?.trim() || undefined;
   const aspectRatio = size ? undefined : context.aspectRatio?.trim() || undefined;
   const quality = context.quality?.trim() || undefined;
+  const inputImages = context.inputImages?.map((url) => url.trim()).filter(Boolean) ?? [];
+  const messageContent = inputImages.length === 0
+    ? context.prompt
+    : [
+        { type: "text", text: context.prompt },
+        ...inputImages.map((url) => ({
+          type: "image_url",
+          image_url: { url, detail: "auto" },
+        })),
+      ];
   return {
     model: context.model,
     prompt: context.prompt,
+    messageContent,
+    message_content: messageContent,
+    inputImages: inputImages.length > 0 ? inputImages : undefined,
+    input_images: inputImages.length > 0 ? inputImages : undefined,
     n: context.n,
     size,
     aspectRatio,
@@ -179,6 +195,16 @@ function toTemplateValues(context: ImageRouteContext): Record<string, unknown> {
     responseFormat: context.responseFormat,
     response_format: context.responseFormat,
   };
+}
+
+/**
+ * 标准图片路由会在带参考图时切到 `/images/edits`；对话/自定义路由则要在
+ * JSON 模板里引用多模态内容或图片数组。调用方据此决定附件控件是否可用。
+ */
+export function imageRouteSupportsInputImages(route: CustomImageRoute): boolean {
+  if (route.id === "images" || route.id === "chat") return true;
+  const variables = routeVariables(route);
+  return variables.has("messageContent") || variables.has("inputImages");
 }
 
 /** 路由 path 允许直接写完整 URL，这时忽略后端的 baseURL。 */
@@ -242,7 +268,17 @@ export function routeVariables(route: CustomImageRoute): Set<string> {
   const found = new Set<string>();
   // 下划线写法归一到驼峰，调用方只用认一套名字
   const add = (name: string): void => {
-    found.add(name === "aspect_ratio" ? "aspectRatio" : name === "response_format" ? "responseFormat" : name);
+    found.add(
+      name === "aspect_ratio"
+        ? "aspectRatio"
+        : name === "response_format"
+          ? "responseFormat"
+          : name === "message_content"
+            ? "messageContent"
+            : name === "input_images"
+              ? "inputImages"
+              : name,
+    );
   };
 
   const scan = (value: unknown): void => {

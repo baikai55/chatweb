@@ -1,5 +1,7 @@
 import type { Backend } from "@/backends/types";
 import {
+  imageRouteFor,
+  imageRouteSupportsInputImages,
   resolveImageRoute,
   selectByPath,
   type ResolvedImageRoute,
@@ -7,6 +9,7 @@ import {
 import {
   TransportError,
   firstString,
+  isAbortError,
   isRecord,
   parseJSON,
   readError,
@@ -21,6 +24,8 @@ export type GenerateImagesOptions = {
   backend: Backend;
   model: string;
   prompt: string;
+  /** 参考图。对话路由发送多模态 content，标准图片路由改走 `/images/edits`。 */
+  inputImages?: string[];
   n: number;
   /** size 与 aspectRatio 只会发送其中一个；同时提供时优先 size。 */
   size?: string;
@@ -54,9 +59,24 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     throw new TransportError(0, "生成数量必须是 1 到 10 之间的整数", "invalid_request");
   }
 
+  const inputImages = options.inputImages?.map((url) => url.trim()).filter(Boolean) ?? [];
+  if (inputImages.length > 16) {
+    throw new TransportError(0, "参考图不能超过 16 张", "invalid_request");
+  }
+  const routeDefinition = imageRouteFor(options.backend, model);
+  if (inputImages.length > 0 && !imageRouteSupportsInputImages(routeDefinition)) {
+    throw new TransportError(0, "当前图片路由没有配置参考图输入", "unsupported_image_input");
+  }
+
+  const standardEdit = inputImages.length > 0 && routeDefinition.id === "images";
+  const routedInputImages = standardEdit
+    ? inputImages
+    : await Promise.all(inputImages.map((url, index) => normalizeJSONInputImage(url, index, options.signal)));
+
   const route = resolveImageRoute(options.backend, {
     model,
     prompt,
+    inputImages: routedInputImages,
     n: options.n,
     size: options.size,
     aspectRatio: options.aspectRatio,
@@ -64,16 +84,23 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     responseFormat: options.responseFormat,
   });
 
+  const requestURL = standardEdit
+    ? imageEditURL(options.backend.baseURL)
+    : route.url;
+  const requestBody = standardEdit
+    ? await buildImageEditBody({ ...options, model, prompt, inputImages })
+    : route.body;
+
   const headers = new Headers({ Accept: "application/json, text/event-stream" });
-  if (route.body !== null) headers.set("Content-Type", "application/json");
+  if (requestBody !== null && !(requestBody instanceof FormData)) headers.set("Content-Type", "application/json");
   if (options.backend.apiKey) {
     headers.set("Authorization", `Bearer ${options.backend.apiKey}`);
   }
 
-  const response = await fetch(route.url, {
+  const response = await fetch(requestURL, {
     method: route.method,
     headers,
-    body: route.body,
+    body: requestBody,
     signal: options.signal,
   });
 
@@ -105,6 +132,100 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
   }
 
   throw new TransportError(response.status, "上游没有返回任何可显示的图片", "empty_response");
+}
+
+type ImageEditBodyOptions = Omit<GenerateImagesOptions, "backend" | "signal" | "onUpdate" | "idleTimeoutMs"> & {
+  inputImages: string[];
+};
+
+async function buildImageEditBody(options: ImageEditBodyOptions & { signal?: AbortSignal }): Promise<FormData> {
+  const body = new FormData();
+  body.set("model", options.model);
+  body.set("prompt", options.prompt);
+  body.set("n", String(options.n));
+  if (options.size) body.set("size", options.size);
+  else if (options.aspectRatio) body.set("aspect_ratio", options.aspectRatio);
+  if (options.quality) body.set("quality", options.quality);
+  body.set("response_format", options.responseFormat);
+
+  const images = await Promise.all(options.inputImages.map((url, index) => loadReferenceImage(url, index, options.signal)));
+  const field = images.length === 1 ? "image" : "image[]";
+  for (const image of images) body.append(field, image.blob, image.name);
+  return body;
+}
+
+async function loadReferenceImage(
+  source: string,
+  index: number,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; name: string }> {
+  let response: Response;
+  try {
+    response = await fetch(source, { signal });
+  } catch (caught) {
+    if (signal?.aborted || isAbortError(caught)) throw caught;
+    throw new TransportError(
+      0,
+      "无法读取参考图片。若它来自外部链接，请先下载后再粘贴或上传。",
+      "reference_image_unreadable",
+    );
+  }
+  if (!response.ok) {
+    throw new TransportError(response.status, `读取第 ${index + 1} 张参考图片失败`, "reference_image_unreadable");
+  }
+
+  const blob = await response.blob();
+  const mime = blob.type.toLowerCase();
+  if (mime && !mime.startsWith("image/")) {
+    throw new TransportError(0, `第 ${index + 1} 个参考文件不是图片`, "invalid_reference_image");
+  }
+  return { blob, name: `reference-${index + 1}.${imageFileExtension(mime)}` };
+}
+
+function imageEditURL(baseURL: string): string {
+  return `${baseURL.replace(/\/+$/, "")}/images/edits`;
+}
+
+function imageFileExtension(mime: string): string {
+  if (mime === "image/jpeg") return "jpg";
+  const extension = /^image\/([a-z0-9.+-]+)$/i.exec(mime)?.[1];
+  return extension && /^[a-z0-9]+$/i.test(extension) ? extension.toLowerCase() : "png";
+}
+
+/** blob: URL 只能在当前页面读取，JSON 发到上游前必须变成 data URL。 */
+async function normalizeJSONInputImage(source: string, index: number, signal?: AbortSignal): Promise<string> {
+  if (!source.toLowerCase().startsWith("blob:")) return source;
+  const { blob } = await loadReferenceImage(source, index, signal);
+  return readBlobAsDataURL(blob.type ? blob : blob.slice(0, blob.size, "image/png"), signal);
+}
+
+function readBlobAsDataURL(blob: Blob, signal?: AbortSignal): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const abort = (): void => {
+      reader.abort();
+      reject(new DOMException("请求已取消", "AbortError"));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+    reader.onerror = () => {
+      signal?.removeEventListener("abort", abort);
+      reject(new TransportError(0, "读取参考图片失败", "reference_image_unreadable"));
+    };
+    reader.onload = () => {
+      signal?.removeEventListener("abort", abort);
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!result.startsWith("data:image/")) {
+        reject(new TransportError(0, "参考图片无法转换为图片数据", "reference_image_unreadable"));
+        return;
+      }
+      resolve(result);
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 type ImageExtractor = (payload: unknown, baseURL: string) => ImageResult[];
