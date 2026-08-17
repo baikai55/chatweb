@@ -376,19 +376,32 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center border-b px-3 py-2">
-        <Tabs value={mode} onValueChange={changeMode}>
-          <TabsList>
-            <TabsTrigger value="tts" disabled={!hasTTS} className="gap-1.5">
+      <div className="flex shrink-0 flex-col items-stretch gap-2 border-b px-3 py-2 md:flex-row md:items-center">
+        <Tabs
+          value={mode}
+          onValueChange={changeMode}
+          className="min-w-0 shrink-0"
+        >
+          <TabsList
+            aria-label="语音功能模式"
+            aria-describedby={!knownCapabilities ? "voice-capability-hint" : undefined}
+            className="max-w-full overflow-x-auto"
+          >
+            <TabsTrigger value="tts" disabled={!hasTTS} className="shrink-0 gap-1.5 whitespace-nowrap">
               <AudioLines className="size-3.5" />文本转语音
             </TabsTrigger>
-            <TabsTrigger value="stt" disabled={!hasSTT} className="gap-1.5">
+            <TabsTrigger value="stt" disabled={!hasSTT} className="shrink-0 gap-1.5 whitespace-nowrap">
               <Mic className="size-3.5" />语音转文字
             </TabsTrigger>
           </TabsList>
         </Tabs>
         {!knownCapabilities ? (
-          <span className="ml-auto text-right text-xs leading-4 text-muted-foreground">
+          <span
+            id="voice-capability-hint"
+            role="note"
+            title="设置中未指定面板能力，当前全部展示，是否可用以上游实际响应为准"
+            className="min-w-0 max-w-full whitespace-normal text-left text-xs leading-4 text-muted-foreground md:ml-auto md:max-w-[50%] md:text-right"
+          >
             设置中未指定面板能力，当前全部展示，是否可用以上游实际响应为准
           </span>
         ) : null}
