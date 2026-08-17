@@ -1,5 +1,6 @@
 import { firstString, isRecord, parseJSON, readError, toTransportError, TransportError } from "@/transport/errors";
 import { joinURL } from "@/transport/chat-completions";
+import { fetchWorkerApi, WorkerAuthorizationError } from "@/transport/worker-access";
 
 /** 一个可以喂给视频生成接口的源媒体。文件会先由面板上传成公网 URL。 */
 export type VideoSource = {
@@ -68,7 +69,7 @@ export async function uploadVideoInput(file: File, signal?: AbortSignal): Promis
 
   const form = new FormData();
   form.append("file", file, file.name || "upload");
-  const response = await fetch("/__api/upload", {
+  const response = await fetchWorkerApi("/__api/upload", {
     method: "POST",
     headers: { Accept: "application/json" },
     body: form,
@@ -76,6 +77,9 @@ export async function uploadVideoInput(file: File, signal?: AbortSignal): Promis
   });
   const text = await response.text();
   const payload = parseJSON(text);
+  if (response.status === 401) {
+    throw new WorkerAuthorizationError("上传未获得 Worker 授权，请在设置的“联网”页验证访问口令");
+  }
   if (!response.ok) throw toTransportError(response, text);
 
   const url = readURL(payload);

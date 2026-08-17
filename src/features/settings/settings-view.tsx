@@ -1,17 +1,19 @@
-import { Check, Copy, Download, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, Copy, Download, KeyRound, Loader2, LogOut, Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { classifyModel, sortForBrowsing, type CatalogModel } from "@/backends/model-catalog";
 import {
   CAPABILITIES,
   MODEL_KINDS,
+  WEB_SEARCH_MODES,
   customImageRouteSchema,
   normalizeBaseURL,
   type Backend,
   type Capability,
   type CustomImageRoute,
   type ModelKind,
+  type WebSearchMode,
 } from "@/backends/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,14 +22,19 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { clearAllSessions } from "@/features/console/chat-store";
 import { clearAllGenerations } from "@/features/history/generation-store";
+import { toggleCapabilitySelection } from "@/features/settings/capability-selection";
+import { listChatInputSTTModels } from "@/features/settings/chat-input-stt-models";
 import { estimateUsage } from "@/shared/db/idb";
 import { cn } from "@/shared/lib/cn";
 import {
   IMAGE_TIMEOUT_MAX_SECONDS,
   IMAGE_TIMEOUT_MIN_SECONDS,
+  SEARCH_PROVIDERS,
   patchAppSettings,
   requestNotificationPermission,
   useAppSettings,
+  type RecordingMode,
+  type SearchProvider,
   type SubmitMode,
 } from "@/shared/settings/app-settings";
 import {
@@ -36,6 +43,11 @@ import {
   isBuiltinRouteId,
   listImageRoutes,
 } from "@/transport/image-routes";
+import {
+  authenticateWorker,
+  clearWorkerAccessToken,
+  hasWorkerAccessToken,
+} from "@/transport/worker-access";
 
 const KIND_LABELS: Record<ModelKind, string> = {
   auto: "自动归类",
@@ -55,6 +67,25 @@ const CAPABILITY_LABELS: Record<Capability, string> = {
   stt: "语音转写",
 };
 
+const WEB_SEARCH_MODE_LABELS: Record<WebSearchMode, string> = {
+  auto: "联网：自动",
+  native: "联网：原生",
+  function: "联网：函数",
+};
+
+const SEARCH_PROVIDER_LABELS: Record<SearchProvider, string> = {
+  auto: "自动",
+  exa: "Exa",
+  "bing-rss": "Bing RSS",
+  duckduckgo: "DuckDuckGo",
+  searxng: "SearXNG",
+  tavily: "Tavily",
+  serper: "Serper",
+};
+
+/** Radix Select 不允许空字符串作为选项值，用内部哨兵表示“尚未选择”。 */
+const NO_CHAT_INPUT_STT_MODEL = "__chatweb_no_chat_input_stt_model__";
+
 /**
  * 模型页上的改动先攒在这里，点保存才落盘。
  *
@@ -68,6 +99,7 @@ const CAPABILITY_LABELS: Record<Capability, string> = {
 export type ModelDraft = {
   savedModels: string[];
   modelOverrides: Record<string, ModelKind>;
+  webSearchModeOverrides: Record<string, WebSearchMode>;
   imageRouteOverrides: Record<string, string>;
 };
 
@@ -94,12 +126,16 @@ export function SettingsView({
   return (
     <div className="mx-auto flex h-full max-w-2xl flex-col gap-3 p-4">
       <Tabs defaultValue="backend" className="flex min-h-0 flex-1 flex-col gap-3">
-        <TabsList className="self-start">
-          <TabsTrigger value="backend">后端</TabsTrigger>
-          <TabsTrigger value="models">模型</TabsTrigger>
-          <TabsTrigger value="routes">图片路由</TabsTrigger>
-          <TabsTrigger value="behavior">行为</TabsTrigger>
-        </TabsList>
+        <div className="-mx-1 min-w-0 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <TabsList aria-label="设置分类">
+            <TabsTrigger value="backend" className="shrink-0">后端</TabsTrigger>
+            <TabsTrigger value="models" className="shrink-0">模型</TabsTrigger>
+            <TabsTrigger value="search" className="shrink-0">联网</TabsTrigger>
+            <TabsTrigger value="routes" className="shrink-0">图片路由</TabsTrigger>
+            <TabsTrigger value="voice" className="shrink-0">语音</TabsTrigger>
+            <TabsTrigger value="behavior" className="shrink-0">行为</TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="backend" className="min-h-0 flex-1 overflow-y-auto">
           <BackendSection backend={backend} onPatch={onPatch} onRemove={onRemove} onAdd={onAdd} />
@@ -111,8 +147,14 @@ export function SettingsView({
             draft={draft} onDraftChange={onDraftChange}
           />
         </TabsContent>
+        <TabsContent value="search" className="min-h-0 flex-1 overflow-y-auto">
+          <SearchSettingsSection />
+        </TabsContent>
         <TabsContent value="routes" className="min-h-0 flex-1 overflow-y-auto">
           <RouteSection backend={backend} onPatch={onPatch} />
+        </TabsContent>
+        <TabsContent value="voice" className="min-h-0 flex-1 overflow-y-auto">
+          <VoiceSettingsSection backend={backend} models={models} onPatch={onPatch} />
         </TabsContent>
         <TabsContent value="behavior" className="min-h-0 flex-1 overflow-y-auto">
           <div className="flex flex-col gap-3">
@@ -122,6 +164,160 @@ export function SettingsView({
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+/* ── 联网 ─────────────────────────────────────────────────────────── */
+
+function SearchSettingsSection() {
+  const settings = useAppSettings();
+  const [provider, setProvider] = useState<SearchProvider>(settings.searchProvider);
+  const [apiKey, setApiKey] = useState(settings.searchApiKey);
+  const [baseUrl, setBaseUrl] = useState(settings.searchBaseUrl);
+  const [workerPassword, setWorkerPassword] = useState("");
+  const [authenticating, setAuthenticating] = useState(false);
+  const [workerAuthorized, setWorkerAuthorized] = useState(() => hasWorkerAccessToken());
+
+  const normalizedBaseUrl = baseUrl.trim();
+  const dirty = provider !== settings.searchProvider
+    || apiKey !== settings.searchApiKey
+    || normalizedBaseUrl !== settings.searchBaseUrl;
+
+  function save(): void {
+    patchAppSettings({
+      searchProvider: provider,
+      searchApiKey: apiKey,
+      searchBaseUrl: normalizedBaseUrl,
+    });
+    setBaseUrl(normalizedBaseUrl);
+    toast.success("联网搜索设置已保存");
+  }
+
+  function restore(): void {
+    setProvider(settings.searchProvider);
+    setApiKey(settings.searchApiKey);
+    setBaseUrl(settings.searchBaseUrl);
+  }
+
+  async function authorizeWorker(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!workerPassword || authenticating) return;
+    setAuthenticating(true);
+    try {
+      await authenticateWorker(workerPassword);
+      setWorkerPassword("");
+      setWorkerAuthorized(true);
+      toast.success("Worker 访问口令已验证");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setAuthenticating(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border p-4">
+      <h2 className="text-sm font-medium">函数搜索</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        只供模型联网方式设为「函数搜索」时使用。原生搜索由模型上游执行，不读取这里的搜索源、密钥或地址。
+      </p>
+
+      <div className="mt-4 flex flex-col gap-3">
+        <Field label="搜索源" hint="自动模式会由搜索服务选择可用来源。">
+          <Select value={provider} onValueChange={(value) => setProvider(value as SearchProvider)}>
+            <SelectTrigger aria-label="函数搜索使用的搜索源" className="h-9 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEARCH_PROVIDERS.map((item) => (
+                <SelectItem key={item} value={item}>{SEARCH_PROVIDER_LABELS[item]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field label="API Key" hint="存在本浏览器里。Tavily 和 Serper 使用，其他搜索源会忽略。">
+          <Input
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            className="h-9 text-sm"
+            placeholder="按需填写"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        </Field>
+
+        <Field label="接口地址" hint="自定义 SearXNG 实例地址；留空使用搜索服务的默认值。">
+          <Input
+            value={baseUrl}
+            onChange={(event) => setBaseUrl(event.target.value)}
+            className="h-9 font-mono text-sm"
+            placeholder="https://search.example.com"
+            inputMode="url"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        </Field>
+      </div>
+
+      <div className="mt-3 flex gap-2">
+        <Button size="sm" className="h-8 text-xs" disabled={!dirty} onClick={save}>保存</Button>
+        {dirty ? (
+          <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={restore}>还原</Button>
+        ) : null}
+      </div>
+
+      <div className="mt-4 border-t pt-4">
+        <h3 className="text-sm font-medium">Worker 访问口令</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          部署配置了 ACCESS_PASSWORD 时需要验证。口令不会保存，换取的 token 只保留在当前标签页。
+        </p>
+        {workerAuthorized ? (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="min-w-0 flex-1 text-xs text-muted-foreground">当前标签页已验证</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 shrink-0 gap-1.5 text-xs"
+              onClick={() => {
+                clearWorkerAccessToken();
+                setWorkerAuthorized(false);
+              }}
+            >
+              <LogOut className="size-3.5" />
+              清除凭证
+            </Button>
+          </div>
+        ) : (
+          <form className="mt-3 flex gap-2" onSubmit={authorizeWorker}>
+            <Input
+              type="password"
+              value={workerPassword}
+              onChange={(event) => setWorkerPassword(event.target.value)}
+              className="h-9 min-w-0 text-sm"
+              aria-label="Worker 访问口令"
+              placeholder="按需填写"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              className="h-9 shrink-0 gap-1.5 text-xs"
+              disabled={!workerPassword || authenticating}
+            >
+              {authenticating ? <Loader2 className="size-3.5 animate-spin" /> : <KeyRound className="size-3.5" />}
+              验证
+            </Button>
+          </form>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -154,11 +350,9 @@ function BackendSection({
   }
 
   function toggleCapability(capability: Capability): void {
-    onPatch({
-      capabilities: backend.capabilities.includes(capability)
-        ? backend.capabilities.filter((item) => item !== capability)
-        : [...backend.capabilities, capability],
-    });
+    const next = toggleCapabilitySelection(backend.capabilities, capability);
+    if (next === backend.capabilities) return;
+    onPatch({ capabilities: next });
   }
 
   return (
@@ -214,14 +408,20 @@ function BackendSection({
           {CAPABILITIES.map((capability) => {
             // 一个都没勾时全部显示，所以视觉上也全部点亮
             const on = backend.capabilities.length === 0 || backend.capabilities.includes(capability);
+            const onlyEnabled = backend.capabilities.length === 1 && on;
             return (
               <button
                 key={capability}
                 type="button"
                 onClick={() => toggleCapability(capability)}
                 aria-pressed={on}
+                aria-label={onlyEnabled
+                  ? `${CAPABILITY_LABELS[capability]}（至少保留一个面板）`
+                  : CAPABILITY_LABELS[capability]}
+                disabled={onlyEnabled}
+                title={onlyEnabled ? "至少保留一个面板" : undefined}
                 className={cn(
-                  "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                  "rounded-full border px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60",
                   on ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
                 )}
               >
@@ -232,12 +432,13 @@ function BackendSection({
         </div>
 
         <p className="mt-3 text-xs text-muted-foreground">
-          自己勾，一个都没勾时全部显示。
+          首次未配置时默认全部显示；点击已开启项会关闭它，且至少保留一个面板。
           以前这里是自动探测的 —— <strong className="font-medium">去掉了</strong>：
           那要对 5 个端点各发一次空请求，有些站会把这种密集小请求判成测活直接封号。
           宁可多显示一个面板、点进去看到真实报错，也不值得为此冒风险。
         </p>
       </section>
+
     </div>
   );
 }
@@ -265,6 +466,7 @@ function ModelSection({
   const current: ModelDraft = draft ?? {
     savedModels: backend.savedModels,
     modelOverrides: backend.modelOverrides,
+    webSearchModeOverrides: backend.webSearchModeOverrides,
     imageRouteOverrides: backend.imageRouteOverrides,
   };
   const dirty = draft !== null;
@@ -309,6 +511,13 @@ function ModelSection({
     if (!routeId) delete next[modelId];
     else next[modelId] = routeId;
     edit({ imageRouteOverrides: next });
+  }
+
+  function setWebSearchMode(modelId: string, mode: WebSearchMode): void {
+    const next = { ...current.webSearchModeOverrides };
+    if (mode === "auto") delete next[modelId];
+    else next[modelId] = mode;
+    edit({ webSearchModeOverrides: next });
   }
 
   /** 草稿里的归类，跟 model-catalog 的 decorate 同一套规则。 */
@@ -390,6 +599,17 @@ function ModelSection({
                         ariaLabel={`${model.id} 归到哪个面板`}
                         options={MODEL_KINDS.map((item) => ({ value: item, label: KIND_LABELS[item] }))}
                       />
+                      {kind === "chat" ? (
+                        <MiniSelect
+                          value={current.webSearchModeOverrides[model.id] ?? "auto"}
+                          onChange={(value) => setWebSearchMode(model.id, value as WebSearchMode)}
+                          ariaLabel={`${model.id} 的联网搜索方式`}
+                          options={WEB_SEARCH_MODES.map((item) => ({
+                            value: item,
+                            label: WEB_SEARCH_MODE_LABELS[item],
+                          }))}
+                        />
+                      ) : null}
                       {kind === "image" ? (
                         <MiniSelect
                           value={current.imageRouteOverrides[model.id] ?? "__default"}
@@ -427,6 +647,7 @@ function ModelSection({
                 onPatch({
                   savedModels: current.savedModels,
                   modelOverrides: current.modelOverrides,
+                  webSearchModeOverrides: current.webSearchModeOverrides,
                   imageRouteOverrides: current.imageRouteOverrides,
                 });
                 onDraftChange(null);
@@ -649,6 +870,113 @@ function RouteSection({
             多数后端不用填；填了但一个都没命中时也会回落到通用提取。
           </p>
         </div>
+      </section>
+    </div>
+  );
+}
+
+/* ── 语音 ─────────────────────────────────────────────────────────── */
+
+function VoiceSettingsSection({
+  backend, models, onPatch,
+}: {
+  backend: Backend;
+  models: CatalogModel[];
+  onPatch: (changes: Partial<Backend>) => void;
+}) {
+  const settings = useAppSettings();
+  const sttModels = listChatInputSTTModels(models);
+  const selectedSTTAvailable = sttModels.some((model) => model.id === backend.chatInputSTTModel);
+  const selectedSTTUnavailable = Boolean(backend.chatInputSTTModel) && !selectedSTTAvailable;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <section className="flex flex-col gap-4 rounded-lg border p-4">
+        <h2 className="text-sm font-medium">录音</h2>
+        <SettingRow
+          label="聊天框显示麦克风"
+          description="仅控制聊天输入框里的语音输入按钮；语音页始终显示录音入口。"
+          control={
+            <Toggle
+              checked={settings.showChatMicrophone}
+              onChange={() => patchAppSettings({ showChatMicrophone: !settings.showChatMicrophone })}
+              label="聊天框显示麦克风"
+            />
+          }
+        />
+        <SettingRow
+          label="录音操作方式"
+          description="聊天输入框和语音页共用。按住说话会在松开时结束；点击模式需再次点击才结束。"
+          control={
+            <MiniSelect
+              value={settings.recordingMode}
+              onChange={(value) => patchAppSettings({ recordingMode: value as RecordingMode })}
+              ariaLabel="录音操作方式"
+              options={[
+                { value: "hold", label: "按住说话" },
+                { value: "toggle", label: "点击开始/停止" },
+              ]}
+            />
+          }
+        />
+      </section>
+
+      <section className="rounded-lg border p-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="shrink-0 text-sm font-medium">聊天转写模型</h2>
+          <span
+            className="ml-auto max-w-[55%] truncate rounded bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground"
+            title={backend.name}
+          >
+            {backend.name}
+          </span>
+        </div>
+
+        <div className="mt-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+          <Select
+            value={selectedSTTAvailable ? backend.chatInputSTTModel : NO_CHAT_INPUT_STT_MODEL}
+            onValueChange={(value) => onPatch({
+              chatInputSTTModel: value === NO_CHAT_INPUT_STT_MODEL ? "" : value,
+            })}
+            disabled={sttModels.length === 0}
+          >
+            <SelectTrigger aria-label="聊天语音输入的转写模型" className="h-9 min-w-0 flex-1 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_CHAT_INPUT_STT_MODEL}>未选择</SelectItem>
+              {sttModels.map((model) => (
+                <SelectItem key={model.id} value={model.id}>
+                  {model.displayName && model.displayName !== model.id
+                    ? `${model.displayName} · ${model.id}`
+                    : model.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedSTTUnavailable ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9 self-start text-xs sm:shrink-0"
+              onClick={() => onPatch({ chatInputSTTModel: "" })}
+            >
+              清除旧选择
+            </Button>
+          ) : null}
+        </div>
+
+        {selectedSTTUnavailable ? (
+          <p className="mt-2 break-words text-xs text-destructive">
+            此前选择的 <code className="break-all font-mono">{backend.chatInputSTTModel}</code> 已不可用：
+            它可能已取消保存、改了归类，或不在当前模型目录中。请重新选择或清除。
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-muted-foreground">
+            聊天录音结束后用这个模型转成文字。这里只列出「模型」页里已保存且归类为语音转写的模型；
+            {sttModels.length === 0 ? "目前没有候选，请先去模型页保存一个语音转写模型。" : "未选择时聊天麦克风不会开始转写。"}
+          </p>
+        )}
       </section>
     </div>
   );

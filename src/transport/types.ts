@@ -36,6 +36,32 @@ export type ChatMessage = {
   content: ChatMessageContent;
 };
 
+/** OpenAI 兼容的 function tool 调用。只在一次请求的内部消息里使用，不写入聊天历史。 */
+export type ChatFunctionToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
+export type ChatAssistantToolMessage = {
+  role: "assistant";
+  content: string;
+  tool_calls: ChatFunctionToolCall[];
+};
+
+export type ChatToolResultMessage = {
+  role: "tool";
+  content: string;
+  tool_call_id: string;
+  name?: string;
+};
+
+/** 发给上游的消息可以包含 function tool 循环产生的临时消息。 */
+export type ChatRequestMessage = ChatMessage | ChatAssistantToolMessage | ChatToolResultMessage;
+
 /**
  * 从字符串或多模态内容中取出可显示的文本。
  *
@@ -77,6 +103,8 @@ export type ChatStreamSnapshot = {
   text: string;
   reasoning: string;
   tools: ChatToolActivity[];
+  /** 仅供 transport 内部继续 function tool 循环；UI 不需要持久化。 */
+  toolCalls?: ChatFunctionToolCall[];
   /** 上游真实终止原因。CPA 在 chunk 里带 native_finish_reason，比标准 finish_reason 信息量大。 */
   nativeFinishReason?: string;
 };
@@ -90,7 +118,7 @@ export type ChatRequestOptions = {
   baseURL: string;
   apiKey: string;
   model: string;
-  messages: ChatMessage[];
+  messages: ChatRequestMessage[];
   reasoningEffort: ReasoningEffort;
   webSearch: boolean;
   /** 仅 Responses 协议支持，chat/completions 下静默忽略。 */

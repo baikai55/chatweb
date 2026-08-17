@@ -19,9 +19,13 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { validateSTTAudioFile } from "@/features/voice/audio-file";
+import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
+import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { GenerationHistory } from "@/features/history/generation-history";
 import { hydrateAssets, toAsset, type GenerationRecord } from "@/features/history/generation-store";
 import { useGenerationHistory } from "@/features/history/use-generation-history";
+import { useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
 import {
   listVoices,
@@ -61,6 +65,7 @@ export type VoicePanelProps = {
 };
 
 export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
+  const settings = useAppSettings();
   /**
    * 能不能用只看设置页勾了什么，**不看后端方言**。
    *
@@ -91,7 +96,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
   const [language, setLanguage] = useState("zh");
   const [speed, setSpeed] = useState("1");
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("auto");
-  const [withTimestamps, setWithTimestamps] = useState(false);
   const [voiceId, setVoiceId] = useState("eve");
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const [voicesLoading, setVoicesLoading] = useState(false);
@@ -103,9 +107,11 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
   const [ttsResult, setTTSResult] = useState<SpeechAudioResult | null>(null);
   const [sttResult, setSTTResult] = useState<TranscriptionResult | null>(null);
   const [activeRequest, setActiveRequest] = useState<ActiveRequest>(null);
+  const [recorderPhase, setRecorderPhase] = useState<RecorderPhase>("idle");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileSelectionRef = useRef(0);
   const requestRef = useRef<AbortController | null>(null);
   const audioResultRef = useRef<SpeechAudioResult | null>(null);
 
@@ -123,29 +129,79 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
    * 交给 `replaceAudioResult` 管生命周期，它本来就负责 revoke 上一条。
    */
   function showRecord(item: GenerationRecord) {
+    // 请求运行中不允许历史记录替换当前模式和结果，否则取消按钮会被藏到另一个标签页。
+    if (activeRequest !== null || recorderPhase !== "idle") return;
+    const recordMode: VoiceMode = item.text !== undefined ? "stt" : "tts";
+    if ((recordMode === "tts" && !hasTTS) || (recordMode === "stt" && !hasSTT)) {
+      setStatus("");
+      setError(recordMode === "tts"
+        ? "这是一条文本转语音历史；请先在设置里开启语音合成再查看"
+        : "这是一条语音转文字历史；请先在设置里开启语音转写再查看");
+      return;
+    }
     setError("");
-    setActiveRecordId(item.id);
+    const params = item.params ?? {};
 
     if (item.text !== undefined) {
       setMode("stt");
       replaceAudioResult(null);
-      setSTTResult({ text: item.text });
+      clearFile();
+      if (sttModels.some((model) => model.id === item.model)) setSTTModel(item.model);
+      const storedLanguage = readStoredString(params.language);
+      if (storedLanguage && (storedLanguage === "auto" || LANGUAGE_OPTIONS.some((option) => option.value === storedLanguage))) {
+        setSTTLanguage(storedLanguage);
+      } else {
+        setSTTLanguage("auto");
+      }
+      setSTTResult({
+        text: item.text,
+        language: readStoredString(params.resultLanguage),
+        duration: readStoredNumber(params.duration),
+        words: readStoredWords(params.words),
+      });
+      setActiveRecordId(item.id);
       setStatus(`历史记录 · ${new Date(item.createdAt).toLocaleString()}`);
       return;
     }
 
     const { urls } = hydrateAssets(item);
     const first = urls[0];
-    if (!first) return;
+    if (!first) {
+      setError("这条历史记录里的音频已经不可用");
+      return;
+    }
     setMode("tts");
     setSTTResult(null);
-    setText(item.title);
+    clearFile();
+    if (ttsModels.some((model) => model.id === item.model)) setTTSModel(item.model);
+    setText(readStoredString(params.prompt) ?? item.title);
+    setVoiceId(readStoredString(params.voiceId) ?? "eve");
+    const storedLanguage = readStoredString(params.language);
+    if (storedLanguage && LANGUAGE_OPTIONS.some((option) => option.value === storedLanguage)) {
+      setLanguage(storedLanguage);
+    } else {
+      setLanguage("zh");
+    }
+    const storedSpeed = readStoredNumber(params.speed);
+    if (storedSpeed !== undefined && storedSpeed >= SPEED_MIN && storedSpeed <= SPEED_MAX) {
+      setSpeed(String(storedSpeed));
+    } else {
+      setSpeed("1");
+    }
+    const storedFormat = readStoredString(params.outputFormat);
+    if (isOutputFormat(storedFormat)) {
+      setOutputFormat(storedFormat);
+    } else {
+      setOutputFormat("auto");
+    }
     // source: "binary" 让 releaseSpeechAudio 认得这是需要 revoke 的对象 URL
     replaceAudioResult({
       url: first.url,
       contentType: first.contentType ?? "audio/mpeg",
+      duration: readStoredNumber(params.duration),
       source: "binary",
     });
+    setActiveRecordId(item.id);
     setStatus(`历史记录 · ${new Date(item.createdAt).toLocaleString()}`);
   }
 
@@ -226,11 +282,11 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     );
   }
 
-  const busy = activeRequest !== null;
+  const busy = activeRequest !== null || recorderPhase !== "idle";
 
   function changeMode(value: string) {
     const next = value as VoiceMode;
-    if ((next === "tts" && !hasTTS) || (next === "stt" && !hasSTT)) return;
+    if (busy || (next === "tts" && !hasTTS) || (next === "stt" && !hasSTT)) return;
     requestRef.current?.abort();
     setMode(next);
     setError("");
@@ -241,13 +297,23 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     requestRef.current?.abort();
   }
 
+  function handleRecordedAudio(recording: RecordedAudio) {
+    setError("");
+    void selectAudioFile(recording.file);
+  }
+
+  function handleRecorderError(recorderError: AudioRecorderError) {
+    setStatus("");
+    setError(recorderError.message);
+  }
+
   async function submitTTS(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = text.trim();
     const selectedVoice = voiceId.trim();
     const selectedLanguage = language.trim();
     const parsedSpeed = Number(speed);
-    if (!prompt || !ttsModel || !selectedVoice || !selectedLanguage || busy) return;
+    if (!prompt || !ttsModel || !selectedVoice || !selectedLanguage || busy || requestRef.current) return;
     if (!Number.isFinite(parsedSpeed) || parsedSpeed < SPEED_MIN || parsedSpeed > SPEED_MAX) {
       setError(`语速必须在 ${SPEED_MIN} 到 ${SPEED_MAX} 之间`);
       return;
@@ -271,7 +337,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
         language: selectedLanguage,
         speed: parsedSpeed,
         outputFormat: outputFormat === "auto" ? undefined : outputFormat,
-        withTimestamps,
         signal: controller.signal,
       });
       replaceAudioResult(result);
@@ -284,8 +349,8 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
         title: prompt,
         assets: [{ ...asset, contentType: asset.contentType ?? result.contentType }],
         params: {
-          mode: "tts", voiceId: selectedVoice, language: selectedLanguage,
-          speed: parsedSpeed, outputFormat, withTimestamps,
+          mode: "tts", prompt, voiceId: selectedVoice, language: selectedLanguage,
+          speed: parsedSpeed, outputFormat, duration: result.duration,
         },
       });
       setActiveRecordId(saved.id);
@@ -305,7 +370,16 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
 
   async function submitSTT(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!audioFile || !sttModel || busy) return;
+    if (!audioFile || !sttModel || busy || requestRef.current) return;
+    const fileSelection = fileSelectionRef.current;
+    const validationError = await validateSTTAudioFile(audioFile);
+    if (fileSelectionRef.current !== fileSelection) return;
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    // 文件头校验是异步的；挡住校验期间发生的第二次提交。
+    if (requestRef.current) return;
 
     const controller = new AbortController();
     requestRef.current = controller;
@@ -333,7 +407,13 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
         title: audioFile.name,
         assets: [],
         text: result.text,
-        params: { mode: "stt", language: sttLanguage },
+        params: {
+          mode: "stt",
+          language: sttLanguage,
+          resultLanguage: result.language,
+          duration: result.duration,
+          words: result.words,
+        },
       });
       setActiveRecordId(saved.id);
     } catch (caught) {
@@ -350,7 +430,25 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     }
   }
 
+  async function selectAudioFile(file: File) {
+    const selection = fileSelectionRef.current + 1;
+    fileSelectionRef.current = selection;
+    setStatus("正在检查音频文件…");
+    setError("");
+    const validationError = await validateSTTAudioFile(file);
+    if (fileSelectionRef.current !== selection) return;
+    if (validationError) {
+      setStatus("");
+      setError(validationError);
+      clearFile();
+      return;
+    }
+    setStatus("");
+    setAudioFile(file);
+  }
+
   function clearFile() {
+    fileSelectionRef.current += 1;
     setAudioFile(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
@@ -363,7 +461,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     setLanguage("zh");
     setSpeed("1");
     setOutputFormat("auto");
-    setWithTimestamps(false);
     setVoiceId(voices[0]?.voiceId ?? "eve");
     setSTTLanguage("auto");
     clearFile();
@@ -387,10 +484,10 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
             aria-describedby={!knownCapabilities ? "voice-capability-hint" : undefined}
             className="max-w-full overflow-x-auto"
           >
-            <TabsTrigger value="tts" disabled={!hasTTS} className="shrink-0 gap-1.5 whitespace-nowrap">
+            <TabsTrigger value="tts" disabled={!hasTTS || busy} className="shrink-0 gap-1.5 whitespace-nowrap">
               <AudioLines className="size-3.5" />文本转语音
             </TabsTrigger>
-            <TabsTrigger value="stt" disabled={!hasSTT} className="shrink-0 gap-1.5 whitespace-nowrap">
+            <TabsTrigger value="stt" disabled={!hasSTT || busy} className="shrink-0 gap-1.5 whitespace-nowrap">
               <Mic className="size-3.5" />语音转文字
             </TabsTrigger>
           </TabsList>
@@ -413,13 +510,14 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
         onNew={startNew}
         newLabel="新语音"
         newDisabled={busy}
+        busy={busy}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);
           if (id === activeRecordId) setActiveRecordId(null);
         }}
         onClear={() => { history.clear(); setActiveRecordId(null); }}
-        emptyHint="合成过的语音和转写结果会存在这里。语音存的是音频字节，刷新也能放。"
+        emptyHint="合成过的语音和转写结果会存在这里。本地音频字节刷新后仍可播放；远程链接的有效期由上游决定。"
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -499,16 +597,6 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
                       </SelectContent>
                     </Select>
                   </LabeledControl>
-                  <label className="flex h-8 items-center gap-2 self-end rounded-md bg-secondary/55 px-3 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={withTimestamps}
-                      onChange={(event) => setWithTimestamps(event.target.checked)}
-                      disabled={busy}
-                      className="size-3.5 accent-primary"
-                    />
-                    返回时间戳
-                  </label>
                 </div>
 
                 {voicesError ? (
@@ -564,9 +652,14 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="audio/*,.mp3,.wav,.m4a,.ogg,.opus,.aac,.flac,.webm"
+                  accept="audio/*,.mp3,.wav,.wave,.m4a,.ogg,.opus,.aac,.flac,.webm"
                   className="hidden"
-                  onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)}
+                  disabled={busy}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null;
+                    if (!file) return;
+                    void selectAudioFile(file);
+                  }}
                 />
 
                 {audioFile ? (
@@ -582,14 +675,34 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
                     {filePreviewURL ? <audio controls preload="metadata" src={filePreviewURL} className="h-9 w-full" /> : null}
                   </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex min-h-36 flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                  >
-                    <Upload className="size-5" />
-                    选择音频文件
-                  </button>
+                  <div className="flex min-h-36 flex-col items-center justify-center gap-3 rounded-lg border border-dashed px-4 text-muted-foreground">
+                    <div className="flex max-w-full flex-wrap items-center justify-center gap-2">
+                      <AudioRecorderButton
+                        mode={settings.recordingMode}
+                        disabled={activeRequest !== null}
+                        disabledReason="语音请求完成后才能录音"
+                        onPhaseChange={setRecorderPhase}
+                        onRecorded={handleRecordedAudio}
+                        onError={handleRecorderError}
+                        showStatus={recorderPhase !== "idle"}
+                        className="border bg-background text-foreground"
+                        containerClassName="max-w-full"
+                      />
+                      <span className="text-xs">或</span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={busy}
+                        className="gap-1.5"
+                      >
+                        <Upload className="size-4" />
+                        选择音频文件
+                      </Button>
+                    </div>
+                    <span className="text-[11px]">MP3、WAV、M4A、OGG、OPUS、AAC、FLAC、WebM · 最大 100 MB</span>
+                  </div>
                 )}
 
                 <SubmitRow
@@ -763,4 +876,35 @@ function fileExtension(contentType: string): string {
   if (contentType.includes("aac")) return "aac";
   if (contentType.includes("flac")) return "flac";
   return "mp3";
+}
+
+function readStoredString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readStoredNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return undefined;
+}
+
+function isOutputFormat(value: unknown): value is OutputFormat {
+  return value === "auto" || OUTPUT_FORMATS.some((format) => format === value);
+}
+
+/** IndexedDB 里的旧记录或手改数据都不能直接断言成转写词数组。 */
+function readStoredWords(value: unknown): TranscriptionResult["words"] {
+  if (!Array.isArray(value)) return undefined;
+  const words = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    const text = readStoredString(row.text);
+    const start = readStoredNumber(row.start);
+    const end = readStoredNumber(row.end);
+    if (!text || start === undefined || end === undefined) return [];
+    const speaker = typeof row.speaker === "string" || typeof row.speaker === "number"
+      ? row.speaker
+      : undefined;
+    return [{ text, start, end, speaker }];
+  });
+  return words.length > 0 ? words : undefined;
 }

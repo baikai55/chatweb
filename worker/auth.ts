@@ -1,8 +1,8 @@
 /**
  * 访问口令 → 短期 token。
  *
- * 只在「服务端密钥模式」下用：访问者输入口令，换一个有时效的签名 token，
- * 之后用它调 /__api/proxy 和 /__api/upload。真正的上游 API key 始终留在 Worker 里。
+ * 配好访问控制后，访问者输入口令换取有时效的签名 token，之后用它调
+ * /__api/proxy、/__api/upload 和 /__api/search。访问控制可以独立于上游代理启用。
  *
  * 不做明文比对后直接放行 —— 那样每个请求都得再传一次口令。
  */
@@ -20,11 +20,25 @@ export type Env = {
   TOKEN_SECRET?: string;
   MAX_UPLOAD_BYTES?: string;
   MEDIA_CACHE_SECONDS?: string;
+  SEARCH_PROVIDER?: string;
+  SEARCH_API_KEY?: string;
+  SEARCH_BASE_URL?: string;
+  SEARCH_TIMEOUT_MS?: string;
 };
 
-/** 服务端密钥模式是否可用。三样缺一不可。 */
+/** 访问控制独立于代理；只保护搜索/上传时也可以启用。 */
+export function isTokenAccessConfigured(env: Env): boolean {
+  return Boolean(env.ACCESS_PASSWORD && env.TOKEN_SECRET);
+}
+
+/** 两项只配了一项也算启用了访问控制，路由必须失败关闭。 */
+export function hasTokenAccessSettings(env: Env): boolean {
+  return Boolean(env.ACCESS_PASSWORD || env.TOKEN_SECRET);
+}
+
+/** 服务端密钥代理是否可用。四样缺一不可。 */
 export function isProxyModeConfigured(env: Env): boolean {
-  return Boolean(env.UPSTREAM_BASE_URL && env.UPSTREAM_API_KEY && env.ACCESS_PASSWORD && env.TOKEN_SECRET);
+  return Boolean(env.UPSTREAM_BASE_URL && env.UPSTREAM_API_KEY && isTokenAccessConfigured(env));
 }
 
 export async function issueToken(env: Env, nowSeconds: number): Promise<string> {
@@ -35,7 +49,7 @@ export async function issueToken(env: Env, nowSeconds: number): Promise<string> 
 }
 
 export async function verifyToken(env: Env, token: string | null, nowSeconds: number): Promise<boolean> {
-  if (!token) return false;
+  if (!isTokenAccessConfigured(env) || !token) return false;
   const separator = token.lastIndexOf(".");
   if (separator <= 0) return false;
 

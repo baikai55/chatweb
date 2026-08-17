@@ -27,7 +27,7 @@ describe("readError 兼容各家的错误体形状", () => {
 });
 
 describe("toTransportError 给费解的报错补一句人话", () => {
-  it("400 里出现 web_search 时指回联网开关", () => {
+  it("400 里出现 web_search 时提示切到函数搜索", () => {
     // 实测：CPA 转发到 oneapi 上的第三方 DeepSeek 会回这一句。
     // 原文全是 deserialize / target type，完全指不到"是我点了那个按钮"。
     const body = JSON.stringify({
@@ -37,7 +37,8 @@ describe("toTransportError 给费解的报错补一句人话", () => {
       },
     });
     const error = failed(400, body);
-    expect(error.message).toContain("把工具栏里的「联网」关掉");
+    expect(error.message).toContain("联网方式改成「函数」");
+    expect(error.message).toContain("关闭工具栏里的「联网」");
     expect(error.message).toContain("unknown variant");
   });
 

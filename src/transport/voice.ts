@@ -117,7 +117,11 @@ export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promis
   if (isJSONContentType(contentType)) {
     const responseText = await response.text();
     const payload = parseJSON(responseText);
-    const result = readJSONAudio(payload, options.baseURL, contentType);
+    const result = readJSONAudio(
+      payload,
+      options.baseURL,
+      codecContentType(options.outputFormat) || contentType,
+    );
     if (!result) {
       throw new TransportError(response.status, "语音合成响应里没有可播放的音频", "invalid_response");
     }
@@ -126,7 +130,11 @@ export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promis
 
   if (contentType.startsWith("text/")) {
     const responseText = (await response.text()).trim();
-    const result = readAudioValue(responseText, options.baseURL, "audio/mpeg");
+    const result = readAmbiguousAudioValue(
+      responseText,
+      options.baseURL,
+      codecContentType(options.outputFormat) || "audio/mpeg",
+    );
     if (result) return result;
     throw new TransportError(response.status, "语音合成响应里没有可播放的音频", "invalid_response");
   }
@@ -238,16 +246,19 @@ function readLanguage(value: unknown): string {
 }
 
 function readJSONAudio(payload: unknown, baseURL: string, fallbackContentType: string): SpeechAudioResult | null {
-  if (typeof payload === "string") return readAudioValue(payload, baseURL, fallbackContentType);
+  if (typeof payload === "string") return readAmbiguousAudioValue(payload, baseURL, fallbackContentType);
   if (!isRecord(payload)) return null;
 
   const duration = readFiniteNumber(payload.duration, payload.duration_seconds, payload.durationSeconds);
-  const contentType = firstString(payload.content_type, payload.contentType, payload.mime_type, payload.mimeType)
-    || (fallbackContentType.startsWith("audio/") ? fallbackContentType : "audio/mpeg");
+  // JSON 响应本身的 Content-Type 通常是 application/json；有些上游还会把
+  // 音频类型笼统写成 application/octet-stream。二者都不能压过请求的 codec。
+  const contentType = normalizeAudioMime(
+    firstString(payload.content_type, payload.contentType, payload.mime_type, payload.mimeType),
+  ) || normalizeAudioMime(fallbackContentType) || "audio/mpeg";
 
   const directURL = firstString(payload.url, payload.audio_url, payload.audioUrl, payload.download_url, payload.downloadUrl);
   if (directURL) {
-    const result = readAudioValue(directURL, baseURL, contentType);
+    const result = readAudioURLValue(directURL, baseURL, contentType);
     return result ? { ...result, duration } : null;
   }
 
@@ -283,7 +294,8 @@ function readAudioValue(value: string, baseURL: string, contentType: string): Sp
   if (!audio) return null;
 
   if (audio.startsWith("data:")) {
-    return { url: audio, contentType: readDataURLContentType(audio) || contentType, source: "base64" };
+    const normalized = normalizeAudioDataURL(audio, contentType);
+    return { ...normalized, source: "base64" };
   }
   if (audio.startsWith("blob:")) {
     return { url: audio, contentType, source: "url" };
@@ -292,6 +304,8 @@ function readAudioValue(value: string, baseURL: string, contentType: string): Sp
     return { url: audio, contentType, source: "url" };
   }
 
+  // MP3 裸 base64 经常以 `//u` 开头，看起来像根相对 URL。audio_base64 / audio /
+  // data 等字节字段必须优先按 base64 解释，明确的 URL 字段另走 readAudioURLValue。
   const base64 = normalizeBase64(audio);
   if (base64) {
     return {
@@ -304,6 +318,32 @@ function readAudioValue(value: string, baseURL: string, contentType: string): Sp
     return { url: resolveMediaURL(audio, baseURL), contentType, source: "url" };
   }
   return null;
+}
+
+/** 顶层字符串没有字段名提示语义：先认无歧义路径，再回落到“base64 优先”。 */
+function readAmbiguousAudioValue(value: string, baseURL: string, contentType: string): SpeechAudioResult | null {
+  const audio = value.trim();
+  if (looksLikeUnambiguousRelativeMediaURL(audio)) {
+    return { url: resolveMediaURL(audio, baseURL), contentType, source: "url" };
+  }
+  return readAudioValue(audio, baseURL, contentType);
+}
+
+/** URL 字段可以安全地把无前导斜杠、无扩展名的值按相对地址解析。 */
+function readAudioURLValue(value: string, baseURL: string, contentType: string): SpeechAudioResult | null {
+  const audio = value.trim();
+  if (!audio) return null;
+
+  if (audio.startsWith("data:")) {
+    const normalized = normalizeAudioDataURL(audio, contentType);
+    return { ...normalized, source: "base64" };
+  }
+  if (audio.startsWith("blob:") || /^https?:\/\//i.test(audio)) {
+    return { url: audio, contentType, source: "url" };
+  }
+  // 不放行 javascript: 等任意 scheme，也不把带空白的普通文本拼成 URL。
+  if (/^[a-z][a-z\d+.-]*:/i.test(audio) || /\s/.test(audio)) return null;
+  return { url: resolveMediaURL(audio, baseURL), contentType, source: "url" };
 }
 
 function readTranscription(payload: unknown): TranscriptionResult | null {
@@ -382,7 +422,11 @@ function codecContentType(codec: SynthesizeSpeechOptions["outputFormat"]): strin
  * 统一换成 `audio/ogg`。
  */
 function normalizeAudioMime(contentType: string): string {
-  return contentType === "audio/opus" ? "audio/ogg" : contentType;
+  const mime = normalizeContentType(contentType);
+  if (mime === "audio/opus" || mime === "application/ogg") return "audio/ogg";
+  // application/octet-stream 只是“二进制”，不是可播放格式。返回空值让调用方
+  // 使用请求的 output_format；其他非音频响应头同理。
+  return mime.startsWith("audio/") ? mime : "";
 }
 
 function normalizeBase64(value: string): string | null {
@@ -399,9 +443,26 @@ function looksLikeRelativeMediaURL(value: string): boolean {
     || /\.(mp3|wav|wave|ogg|opus|aac|m4a|flac)([?#].*)?$/i.test(value);
 }
 
+function looksLikeUnambiguousRelativeMediaURL(value: string): boolean {
+  return /^(\.\/|\.\.\/)/.test(value)
+    || /^\/[^/\s]+\/.+/.test(value)
+    || /^\/\/[^/\s]+\.[^/\s]+(?:\/|$)/.test(value)
+    || /\.(mp3|wav|wave|ogg|opus|aac|m4a|flac)([?#].*)?$/i.test(value);
+}
+
 function readDataURLContentType(value: string): string {
   const match = /^data:([^;,]+)/i.exec(value);
   return match?.[1]?.toLowerCase() ?? "";
+}
+
+function normalizeAudioDataURL(value: string, fallback: string): { url: string; contentType: string } {
+  const contentType = normalizeAudioMime(readDataURLContentType(value))
+    || normalizeAudioMime(fallback)
+    || "audio/mpeg";
+  return {
+    url: value.replace(/^data:[^;,]*/i, `data:${contentType}`),
+    contentType,
+  };
 }
 
 function resolveMediaURL(value: string, baseURL: string): string {

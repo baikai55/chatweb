@@ -13,6 +13,13 @@ const STORAGE_KEY = "chatweb:settings";
 export const SUBMIT_MODES = ["enter", "ctrl-enter"] as const;
 export type SubmitMode = (typeof SUBMIT_MODES)[number];
 
+export const RECORDING_MODES = ["hold", "toggle"] as const;
+export type RecordingMode = (typeof RECORDING_MODES)[number];
+
+/** 浏览器执行函数搜索时交给 Worker 使用的搜索源。 */
+export const SEARCH_PROVIDERS = ["auto", "exa", "bing-rss", "duckduckgo", "searxng", "tavily", "serper"] as const;
+export type SearchProvider = (typeof SEARCH_PROVIDERS)[number];
+
 /**
  * 图片生成的等待上限（秒）。
  *
@@ -33,6 +40,16 @@ export const appSettingsSchema = z.object({
   submitMode: z.enum(SUBMIT_MODES).default("enter"),
   /** 提交后清空输入框 */
   clearInputAfterSubmit: z.boolean().default(false),
+  /** 聊天输入框是否显示麦克风入口；语音页不受这个开关影响。 */
+  showChatMicrophone: z.boolean().default(false),
+  /** 麦克风录音是按住说话，还是点击开始、再次点击结束。 */
+  recordingMode: z.enum(RECORDING_MODES).default("hold"),
+  /** 函数搜索使用的搜索源；原生搜索不读取这组配置。 */
+  searchProvider: z.enum(SEARCH_PROVIDERS).default("auto"),
+  /** Tavily / Serper 等搜索源的密钥，按需传给 Worker。 */
+  searchApiKey: z.string().default(""),
+  /** 自定义搜索接口地址，当前主要用于 SearXNG。 */
+  searchBaseUrl: z.string().default(""),
   /** 长任务完成时发系统通知 */
   notifyOnComplete: z.boolean().default(false),
   /** 图片生成等多久算卡死。见上面的常量注释。 */

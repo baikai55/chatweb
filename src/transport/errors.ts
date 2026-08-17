@@ -108,7 +108,7 @@ function annotate(status: number, message: string, rawBody: string): string {
     这种词，指不回"是我点了那个按钮"。
   */
   if (status === 400 && haystack.includes("web_search")) {
-    return `${message}\n\n这个上游只认 type=function 的工具，用不了内置的联网搜索。把工具栏里的「联网」关掉再发一次就行。Gemini 和 Grok 的模型不受影响（实测 CPA 上的 Grok 可以正常搜）。`;
+    return `${message}\n\n这个上游只认 type=function 的工具，用不了内置的联网搜索。去设置页的「模型」把这个模型的联网方式改成「函数」，再发一次；也可以暂时关闭工具栏里的「联网」。Gemini 和 Grok 的模型不受影响（实测 CPA 上的 Grok 可以正常搜）。`;
   }
   if (status === 401) {
     return `${message}\n\nkey 没通过验证。检查设置里的 API Key 是否正确，以及后端是否已经重载了新加的 key。`;

@@ -1,14 +1,28 @@
-import { isProxyModeConfigured, issueToken, readBearer, timingSafeEqual, verifyToken, type Env } from "./auth";
+import {
+  hasTokenAccessSettings,
+  isProxyModeConfigured,
+  isTokenAccessConfigured,
+  issueToken,
+  readBearer,
+  timingSafeEqual,
+  verifyToken,
+  type Env,
+} from "./auth";
+import { BodyTooLargeError, InvalidJsonBodyError, readJsonBodyWithLimit } from "./body";
 import { handleProxy } from "./proxy";
+import { handleSearch } from "./search";
 import { handleMediaRead, handleUpload, json } from "./upload";
+
+const MAX_AUTH_REQUEST_BYTES = 8 * 1024;
 
 /**
  * chatweb 的 Worker 入口。
  *
- * 职责有三：
+ * 职责有四：
  *   1. 托管静态 SPA（env.ASSETS，SPA 兜底路由）
  *   2. R2 上传通道 —— 两种模式下都要用，因为视频编辑需要公网可达的源文件 URL
  *   3. 可选的服务端密钥反代 —— 只在要把链接分享给别人时才需要
+ *   4. function tool 使用的联网搜索执行端
  *
  * 注意默认情况下**聊天请求根本不经过这里**：CPA 和 grok2api 的 CORS 都全开，
  * 浏览器直连更快也更省 Worker 用量。
@@ -40,6 +54,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (path === "/config" && request.method === "GET") {
     return json({
       proxyAvailable: isProxyModeConfigured(env),
+      searchAvailable: true,
+      authRequired: hasTokenAccessSettings(env),
       uploadAvailable: Boolean(env.MEDIA),
       name: env.UPSTREAM_NAME ?? "",
       capabilities: (env.UPSTREAM_CAPABILITIES ?? "")
@@ -52,11 +68,22 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   // 公开：口令换 token
   if (path === "/auth" && request.method === "POST") {
-    if (!isProxyModeConfigured(env)) {
-      return json({ error: "服务端没有启用预置后端模式" }, 501);
+    if (hasTokenAccessSettings(env) && !isTokenAccessConfigured(env)) {
+      return json({ error: "访问控制配置不完整：ACCESS_PASSWORD 和 TOKEN_SECRET 必须同时配置" }, 500);
     }
-    const body = (await request.json().catch(() => null)) as { password?: string } | null;
-    const password = body?.password ?? "";
+    if (!isTokenAccessConfigured(env)) {
+      return json({ error: "服务端没有启用访问口令" }, 501);
+    }
+    let rawBody: unknown;
+    try {
+      rawBody = await readJsonBodyWithLimit(request, MAX_AUTH_REQUEST_BYTES);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) return json({ error: "认证请求太大" }, 413);
+      if (error instanceof InvalidJsonBodyError) return json({ error: "认证请求必须是 JSON 对象" }, 400);
+      throw error;
+    }
+    const body = isObject(rawBody) ? rawBody : null;
+    const password = typeof body?.password === "string" ? body.password : "";
     if (!password || !timingSafeEqual(password, env.ACCESS_PASSWORD ?? "")) {
       return json({ error: "访问口令不对" }, 401);
     }
@@ -81,6 +108,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleUpload(request, env, url.origin);
   }
 
+  if (path === "/search" && request.method === "POST") {
+    return handleSearch(request, env);
+  }
+
   if (path.startsWith("/proxy/")) {
     return handleProxy(request, env, path.slice("/proxy".length));
   }
@@ -90,18 +121,23 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
 /**
  * 鉴权分两种情况：
- *   - 服务端密钥模式：必须持有有效 token
- *   - 纯直连模式（没配 ACCESS_PASSWORD）：上传通道对同源请求开放
+ *   - 配置了访问口令和签名密钥：必须持有有效 token
+ *   - 没配置访问控制：上传和搜索只对可验证的同源请求开放
  *
  * 后者看起来宽松，但这个部署本来就只有你自己在用；真要对外分享就该配上口令。
- * 用 Sec-Fetch-Site 拦掉最基本的第三方站点盗用。
+ * 优先用浏览器生成的 Sec-Fetch-Site；非浏览器请求至少要提供精确匹配的 Origin。
  */
 async function isAuthorized(request: Request, env: Env, now: number): Promise<boolean> {
-  if (isProxyModeConfigured(env)) {
-    return verifyToken(env, readBearer(request), now);
+  if (hasTokenAccessSettings(env)) {
+    return isTokenAccessConfigured(env) && verifyToken(env, readBearer(request), now);
   }
-  const site = request.headers.get("Sec-Fetch-Site");
-  return site === null || site === "same-origin" || site === "same-site";
+  const site = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
+  if (site === "same-origin" || site === "same-site") return true;
+  return request.headers.get("Origin") === new URL(request.url).origin;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function withSecurityHeaders(response: Response): Response {

@@ -111,6 +111,7 @@ function Console({
 
   const saved = savedModelsOnly(decorated);
   const chatModels = modelsForKind(saved, "chat");
+  const sttModels = saved.filter((model) => model.kind === "stt");
   const chat = useChatSessions(backend.id, chatModels[0]?.id ?? "", historyToken);
 
   return (
@@ -149,6 +150,7 @@ function Console({
         <ChatPanel
           backend={backend}
           models={chatModels}
+          sttModels={sttModels}
           session={chat.current}
           onCommit={chat.commit}
           onManage={() => setSettingsOpen(true)}

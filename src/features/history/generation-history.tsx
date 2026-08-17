@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { createPortal } from "react-dom";
 
 import { useSidebarSlot } from "@/app/sidebar-slot";
@@ -26,6 +26,8 @@ export function GenerationHistory({
   onNew,
   newLabel,
   newDisabled = false,
+  disabled = false,
+  busy = false,
   emptyHint,
 }: {
   records: GenerationRecord[];
@@ -36,22 +38,27 @@ export function GenerationHistory({
   onNew: () => void;
   newLabel: string;
   newDisabled?: boolean;
+  /** 禁用所有会切换或修改历史的操作。 */
+  disabled?: boolean;
+  /** 正在执行面板任务；效果同 disabled，并向辅助技术暴露忙碌状态。 */
+  busy?: boolean;
   emptyHint: string;
 }) {
   const slot = useSidebarSlot();
+  const interactionsDisabled = disabled || busy;
 
   const content = (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col" aria-busy={busy || undefined}>
       <div className="px-2 pb-1">
         <Button
           type="button"
           variant="ghost"
           size="sm"
           className="h-8 w-full justify-start gap-2 px-2 text-xs font-normal"
-          disabled={newDisabled}
+          disabled={newDisabled || interactionsDisabled}
           onClick={() => { onNew(); slot.onNavigate(); }}
         >
-          <Plus className="size-3.5" />{newLabel}
+          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}{newLabel}
         </Button>
       </div>
 
@@ -60,7 +67,13 @@ export function GenerationHistory({
           历史{records.length > 0 ? ` (${records.length})` : ""}
         </span>
         {records.length > 0 ? (
-          <ConfirmButton className="ml-auto" label="清空" confirmLabel="确认清空" onConfirm={onClear} />
+          interactionsDisabled ? (
+            <Button variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs font-normal" disabled>
+              清空
+            </Button>
+          ) : (
+            <ConfirmButton className="ml-auto" label="清空" confirmLabel="确认清空" onConfirm={onClear} />
+          )
         ) : null}
       </div>
 
@@ -78,8 +91,9 @@ export function GenerationHistory({
             >
               <button
                 type="button"
+                disabled={interactionsDisabled}
                 onClick={() => { onOpen(item); slot.onNavigate(); }}
-                className="min-w-0 flex-1 px-2 py-1.5 text-left"
+                className="min-w-0 flex-1 px-2 py-1.5 text-left disabled:cursor-not-allowed"
                 title={item.title || item.model}
               >
                 <span className="block truncate text-xs">{item.title || "（无提示词）"}</span>
@@ -87,14 +101,27 @@ export function GenerationHistory({
                   {new Date(item.createdAt).toLocaleString()} · {item.model}
                 </span>
               </button>
-              <ConfirmButton
-                label={<Trash2 className="size-3" />}
-                confirmLabel="确定删除"
-                ariaLabel="删除这条记录"
-                confirmAriaLabel="确定删除这条记录"
-                onConfirm={() => onDelete(item.id)}
-                className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
-              />
+              {interactionsDisabled ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label="删除这条记录"
+                  disabled
+                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity group-hover:opacity-60"
+                >
+                  <Trash2 className="size-3" />
+                </Button>
+              ) : (
+                <ConfirmButton
+                  label={<Trash2 className="size-3" />}
+                  confirmLabel="确定删除"
+                  ariaLabel="删除这条记录"
+                  confirmAriaLabel="确定删除这条记录"
+                  onConfirm={() => onDelete(item.id)}
+                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
+                />
+              )}
             </div>
           ))
         )}

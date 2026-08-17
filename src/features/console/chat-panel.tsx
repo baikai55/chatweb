@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Loader2, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
+import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Loader2, Mic, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -19,10 +19,15 @@ import type { Backend } from "@/backends/types";
 import type { CatalogModel } from "@/backends/model-catalog";
 import { streamChatCompletions, inferVendor, webSearchNote } from "@/transport/chat-completions";
 import { isAbortError } from "@/transport/errors";
+import { transcribeSpeech } from "@/transport/voice";
 import { readChatContentText, type ChatContentPart, type ChatMessageContent, type ChatStreamSnapshot, type ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
+import { appendTranscriptionToDraft } from "@/features/console/chat-voice-input";
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
+import { validateSTTAudioFile } from "@/features/voice/audio-file";
+import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
+import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
 
@@ -124,6 +129,7 @@ function buildUserContent(text: string, images: PendingImage[]): ChatMessageCont
 export function ChatPanel({
   backend,
   models,
+  sttModels,
   session,
   onCommit,
   onManage,
@@ -131,6 +137,8 @@ export function ChatPanel({
   backend: Backend;
   /** 已经过滤成"用户保存过的"，可能为空 */
   models: CatalogModel[];
+  /** 已保存且明确归类为 STT 的模型。 */
+  sttModels: CatalogModel[];
   session: ChatSession;
   onCommit: (session: ChatSession) => void;
   onManage: () => void;
@@ -141,6 +149,10 @@ export function ChatPanel({
   const [draggingImages, setDraggingImages] = useState(false);
   const [streaming, setStreaming] = useState<ChatStreamSnapshot | null>(null);
   const [error, setError] = useState("");
+  const [recorderPhase, setRecorderPhase] = useState<RecorderPhase>("idle");
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState("");
+  const [voiceError, setVoiceError] = useState("");
   /**
    * 哪条消息露出了操作按钮。
    *
@@ -150,8 +162,10 @@ export function ChatPanel({
    */
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sttAbortRef = useRef<AbortController | null>(null);
   const streamSnapshotRef = useRef<ChatStreamSnapshot | null>(null);
   const requestSequenceRef = useRef(0);
+  const sttSequenceRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepthRef = useRef(0);
   const readingImageStatsRef = useRef({ count: 0, bytes: 0 });
@@ -161,11 +175,16 @@ export function ChatPanel({
 
   // 草稿属于当前会话。切换历史时丢掉尚未发送的图片，避免误发到另一段对话。
   useEffect(() => {
+    setInput("");
     setPendingImages([]);
     setReadingImages(0);
     setDraggingImages(false);
     setStreaming(null);
     setError("");
+    setRecorderPhase("idle");
+    setTranscribing(false);
+    setVoiceStatus("");
+    setVoiceError("");
     dragDepthRef.current = 0;
     readingImageStatsRef.current = { count: 0, bytes: 0 };
     streamSnapshotRef.current = null;
@@ -175,12 +194,20 @@ export function ChatPanel({
       requestSequenceRef.current += 1;
       abortRef.current?.abort();
       abortRef.current = null;
+      sttSequenceRef.current += 1;
+      sttAbortRef.current?.abort();
+      sttAbortRef.current = null;
     };
   }, [backend.id, session.id]);
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
-  const search = webSearchNote(model);
+  const chatInputSTTModel = sttModels.some((item) => item.id === backend.chatInputSTTModel)
+    ? backend.chatInputSTTModel
+    : "";
+  const voiceBusy = recorderPhase !== "idle" || transcribing;
+  const searchMode = backend.webSearchModeOverrides[model] ?? "auto";
+  const search = webSearchNote(model, searchMode);
 
   const addImageFiles = useCallback((incoming: FileList | File[]) => {
     const files = Array.from(incoming);
@@ -294,6 +321,78 @@ export function ChatPanel({
     if (event.dataTransfer.files.length > 0) addImageFiles(event.dataTransfer.files);
   }
 
+  function handleRecorderPhaseChange(phase: RecorderPhase) {
+    setRecorderPhase(phase);
+    if (phase !== "idle") {
+      setVoiceStatus("");
+      setVoiceError("");
+    }
+  }
+
+  function handleRecorderError(recorderError: AudioRecorderError) {
+    setVoiceStatus("");
+    setVoiceError(recorderError.message);
+  }
+
+  function cancelTranscription() {
+    sttSequenceRef.current += 1;
+    sttAbortRef.current?.abort();
+    sttAbortRef.current = null;
+    setTranscribing(false);
+    setVoiceStatus("");
+    setVoiceError("");
+  }
+
+  async function transcribeRecording(recording: RecordedAudio) {
+    const targetSessionId = session.id;
+    const selectedModel = chatInputSTTModel;
+    const sequence = sttSequenceRef.current + 1;
+    sttSequenceRef.current = sequence;
+    let controller: AbortController | null = null;
+    const isCurrent = () => (
+      sttSequenceRef.current === sequence && currentSessionIdRef.current === targetSessionId
+    );
+
+    setTranscribing(true);
+    setVoiceStatus("正在检查录音…");
+    setVoiceError("");
+
+    try {
+      if (!selectedModel) throw new Error("请先在设置的“语音”页选择聊天转写模型");
+      const validationError = await validateSTTAudioFile(recording.file);
+      if (!isCurrent()) return;
+      if (validationError) throw new Error(validationError);
+
+      controller = new AbortController();
+      sttAbortRef.current = controller;
+      setVoiceStatus("正在将录音转成文字…");
+      const result = await transcribeSpeech({
+        baseURL: backend.baseURL,
+        apiKey: backend.apiKey,
+        model: selectedModel,
+        file: recording.file,
+        signal: controller.signal,
+      });
+      if (!isCurrent() || sttAbortRef.current !== controller) return;
+
+      const transcription = result.text.trim();
+      if (!transcription) throw new Error("语音识别没有返回文字");
+      setInput((current) => appendTranscriptionToDraft(current, transcription));
+      setVoiceStatus("");
+    } catch (caught) {
+      if (!isCurrent()) return;
+      setVoiceStatus("");
+      if (!isAbortError(caught)) {
+        setVoiceError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      if (sttSequenceRef.current === sequence) {
+        if (controller && sttAbortRef.current === controller) sttAbortRef.current = null;
+        setTranscribing(false);
+      }
+    }
+  }
+
   const stop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
@@ -319,6 +418,10 @@ export function ChatPanel({
         messages: messages.map(({ role, content }) => ({ role, content })),
         reasoningEffort: base.reasoningEffort,
         webSearch: base.webSearch,
+        webSearchMode: backend.webSearchModeOverrides[base.model] ?? "auto",
+        searchProvider: settings.searchProvider,
+        searchApiKey: settings.searchApiKey,
+        searchBaseUrl: settings.searchBaseUrl,
         flavor: backend.flavor,
         vendor: inferVendor(base.model),
         onUpdate: (snapshot) => {
@@ -382,7 +485,7 @@ export function ChatPanel({
   function submit(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if ((!text && pendingImages.length === 0) || readingImages > 0 || streaming || abortRef.current || !model) return;
+    if ((!text && pendingImages.length === 0) || readingImages > 0 || streaming || abortRef.current || voiceBusy || !model) return;
     const userMessage: ConversationMessage = {
       id: createMessageId(),
       role: "user",
@@ -390,7 +493,7 @@ export function ChatPanel({
     };
     const messages = [...session.messages, userMessage];
     const base = { ...session, model, messages, updatedAt: Date.now() };
-    setInput("");
+    if (settings.clearInputAfterSubmit) setInput("");
     setPendingImages([]);
     // 先落盘再请求：发送后的图片立即可见，首个响应片段前停止也不会丢消息。
     onCommit(base);
@@ -439,7 +542,7 @@ export function ChatPanel({
    * 丢掉的部分不进历史 —— 想留旧回复就先复制走。
    */
   function regenerateFrom(id: string) {
-    if (streaming || abortRef.current) return;
+    if (streaming || abortRef.current || voiceBusy) return;
     setSelectedId(null);
     const index = session.messages.findIndex((message) => message.id === id);
     if (index < 0) return;
@@ -605,7 +708,7 @@ export function ChatPanel({
                   variant="ghost"
                   size="icon"
                   aria-label="添加图片"
-                  disabled={models.length === 0 || streaming !== null}
+                  disabled={models.length === 0 || streaming !== null || voiceBusy}
                   className="size-9 shrink-0 rounded-full text-muted-foreground"
                   onClick={() => fileInputRef.current?.click()}
                 >
@@ -615,6 +718,54 @@ export function ChatPanel({
               <TooltipContent>添加图片</TooltipContent>
             </Tooltip>
 
+            {settings.showChatMicrophone ? (
+              transcribing ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="取消语音识别"
+                      className="size-9 shrink-0 rounded-full text-muted-foreground"
+                      onClick={cancelTranscription}
+                    >
+                      <Square className="size-3.5 fill-current" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>取消语音识别</TooltipContent>
+                </Tooltip>
+              ) : chatInputSTTModel ? (
+                <AudioRecorderButton
+                  key={`${backend.id}:${session.id}`}
+                  mode={settings.recordingMode}
+                  disabled={models.length === 0 || streaming !== null}
+                  disabledReason={streaming ? "回复完成后才能录音" : undefined}
+                  onPhaseChange={handleRecorderPhaseChange}
+                  onRecorded={(recording) => { void transcribeRecording(recording); }}
+                  onError={handleRecorderError}
+                  className="text-muted-foreground"
+                />
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="设置聊天转写模型"
+                      disabled={streaming !== null}
+                      className="size-9 shrink-0 rounded-full text-muted-foreground"
+                      onClick={onManage}
+                    >
+                      <Mic className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>先在设置的“语音”页选择聊天转写模型</TooltipContent>
+                </Tooltip>
+              )
+            ) : null}
+
             <Textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -623,7 +774,7 @@ export function ChatPanel({
               placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
               rows={1}
               disabled={models.length === 0}
-              className="max-h-40 min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
+              className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
             />
             {streaming ? (
               <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
@@ -634,13 +785,29 @@ export function ChatPanel({
                 type="submit"
                 size="icon"
                 className="size-9 shrink-0 rounded-full"
-                disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || !model}
+                disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || voiceBusy || !model}
                 aria-label={readingImages > 0 ? "正在读取图片" : "发送"}
               >
                 {readingImages > 0 ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
               </Button>
             )}
           </div>
+
+          {voiceStatus || voiceError ? (
+            <div
+              role={voiceError ? "alert" : "status"}
+              aria-live={voiceError ? "assertive" : "polite"}
+              className={cn(
+                "mt-1 flex items-center gap-1.5 px-2 text-xs",
+                voiceError ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {voiceError
+                ? <TriangleAlert className="size-3.5 shrink-0" />
+                : <Loader2 className="size-3.5 shrink-0 animate-spin" />}
+              <span className="min-w-0 break-words">{voiceError || voiceStatus}</span>
+            </div>
+          ) : null}
         </div>
       </form>
     </div>

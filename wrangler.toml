@@ -36,6 +36,14 @@ UPSTREAM_NAME = ""
 # 可选值: chat,image,video,tts,stt
 UPSTREAM_CAPABILITIES = ""
 
+# —— 联网搜索 ——
+# 可选值: auto,exa,bing-rss,duckduckgo,searxng,tavily,serper
+SEARCH_PROVIDER = "auto"
+# 自建 SearXNG 根地址；非 searxng 时可留空。
+SEARCH_BASE_URL = ""
+# 整个自动兜底链路的总超时，会限制在 1000–15000ms。
+SEARCH_TIMEOUT_MS = "7000"
+
 # —— 上传限制 ——
 MAX_UPLOAD_BYTES = "104857600"
 MEDIA_CACHE_SECONDS = "604800"
@@ -44,3 +52,4 @@ MEDIA_CACHE_SECONDS = "604800"
 #   UPSTREAM_API_KEY   服务端持有的上游 key
 #   ACCESS_PASSWORD    访问口令
 #   TOKEN_SECRET       签发访问 token 用的 HMAC 密钥（随便一串长随机字符）
+#   SEARCH_API_KEY     Tavily 或 Serper key；使用免费搜索时不用设置

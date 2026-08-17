@@ -22,6 +22,10 @@ export type BackendMode = (typeof BACKEND_MODES)[number];
 export const MODEL_KINDS = ["auto", "chat", "image", "video", "tts", "stt", "hidden"] as const;
 export type ModelKind = (typeof MODEL_KINDS)[number];
 
+/** 聊天模型启用联网时使用哪种工具协议。auto 表示按模型自动选择。 */
+export const WEB_SEARCH_MODES = ["auto", "native", "function"] as const;
+export type WebSearchMode = (typeof WEB_SEARCH_MODES)[number];
+
 /**
  * 图片模型走哪条请求路线。
  *
@@ -70,6 +74,8 @@ export const backendSchema = z.object({
   /** 拉模型列表时从响应头认出来的（见 model-catalog 的 readFlavor），不单独探测 */
   flavor: z.enum(BACKEND_FLAVORS).default("generic"),
   chatProtocol: z.enum(CHAT_PROTOCOLS).default("chat-completions"),
+  /** 聊天输入框录音完成后用于转写的 STT 模型；空字符串表示尚未选择。 */
+  chatInputSTTModel: z.string().default(""),
   /**
    * 决定侧边栏显示哪几个面板，用户自己勾。
    *
@@ -82,6 +88,8 @@ export const backendSchema = z.object({
   capabilities: z.array(z.enum(CAPABILITIES)).default([]),
   /** 手动覆盖某个模型的归类 */
   modelOverrides: z.record(z.string(), z.enum(MODEL_KINDS)).default({}),
+  /** 模型 id -> 联网工具协议；没有记录的模型按 auto 处理。 */
+  webSearchModeOverrides: z.record(z.string(), z.enum(WEB_SEARCH_MODES)).default({}),
   /**
    * 用户勾选保存的模型 id，按数组顺序显示。
    * 聊天时的模型选择器只显示这些 —— CPA 一个部署就有 68 个模型，
@@ -131,8 +139,10 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     mode: input.mode ?? "direct",
     flavor: input.flavor ?? "generic",
     chatProtocol: input.chatProtocol ?? "chat-completions",
+    chatInputSTTModel: input.chatInputSTTModel ?? "",
     capabilities: input.capabilities ?? [],
     modelOverrides: input.modelOverrides ?? {},
+    webSearchModeOverrides: input.webSearchModeOverrides ?? {},
     savedModels: input.savedModels ?? [],
     customImageRoutes: input.customImageRoutes ?? [],
     imageRouteOverrides: input.imageRouteOverrides ?? {},

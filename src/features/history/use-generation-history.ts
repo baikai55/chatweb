@@ -1,16 +1,38 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   createGenerationId,
   deleteGeneration,
+  deleteGenerationsThrough,
   deriveGenerationTitle,
   loadGenerations,
+  MAX_GENERATIONS_PER_KIND,
   pruneGenerations,
   saveGeneration,
   type GenerationAsset,
   type GenerationKind,
   type GenerationRecord,
 } from "@/features/history/generation-store";
+
+/**
+ * 合并异步读回的旧记录与加载期间刚生成的新记录。
+ *
+ * `current` 放在前面，所以同 id 时以内存里的新版本为准；统一排序、去重和截断，
+ * 让首屏加载与后续 record() 都遵守和 IndexedDB 相同的 50 条上限。
+ */
+export function mergeGenerationRecords(
+  current: GenerationRecord[],
+  loaded: GenerationRecord[],
+): GenerationRecord[] {
+  const byId = new Map<string, GenerationRecord>();
+  for (const record of current) byId.set(record.id, record);
+  for (const record of loaded) {
+    if (!byId.has(record.id)) byId.set(record.id, record);
+  }
+  return [...byId.values()]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, MAX_GENERATIONS_PER_KIND);
+}
 
 /**
  * 三个生成面板共用的历史。
@@ -24,15 +46,25 @@ import {
 export function useGenerationHistory(scope: string, kind: GenerationKind) {
   const [records, setRecords] = useState<GenerationRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const loadEpochRef = useRef(0);
+  const clearedThroughRef = useRef(-Infinity);
 
   useEffect(() => {
     let cancelled = false;
+    const loadEpoch = loadEpochRef.current + 1;
+    loadEpochRef.current = loadEpoch;
+    clearedThroughRef.current = -Infinity;
     setLoading(true);
     setRecords([]);
 
     void loadGenerations(scope, kind).then((loaded) => {
-      if (cancelled) return;
-      setRecords(loaded);
+      if (cancelled || loadEpochRef.current !== loadEpoch) return;
+      // 加载 IndexedDB 的过程中，用户可能已经完成了一次生成。不能用 loaded
+      // 直接覆盖内存，否则刚出现的结果会从历史里消失。
+      setRecords((current) => mergeGenerationRecords(
+        current.filter((record) => record.scope === scope && record.kind === kind),
+        loaded,
+      ));
       setLoading(false);
     });
 
@@ -50,14 +82,15 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
       id: createGenerationId(),
       scope,
       kind,
-      createdAt: Date.now(),
+      // 清空与紧接着生成可能落在同一毫秒；保证新记录严格晚于清空截止时间。
+      createdAt: Math.max(Date.now(), clearedThroughRef.current + 1),
       model: input.model,
       title: deriveGenerationTitle(input.title),
       text: input.text,
       assets: input.assets,
       params: input.params,
     };
-    setRecords((previous) => [created, ...previous]);
+    setRecords((previous) => mergeGenerationRecords([created], previous));
     void saveGeneration(created).then(() => pruneGenerations(scope, kind));
     return created;
   }, [scope, kind]);
@@ -69,11 +102,14 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
 
   /** 清掉当前后端 + 当前面板的全部记录。设置页那个「删除全部」是跨后端的，不走这里。 */
   const clear = useCallback(() => {
-    setRecords((previous) => {
-      for (const item of previous) void deleteGeneration(item.id);
-      return [];
-    });
-  }, []);
+    const cutoff = Date.now();
+    clearedThroughRef.current = cutoff;
+    // 让清空前启动、尚未返回的 loadGenerations 失效，避免旧快照重新灌回列表。
+    loadEpochRef.current += 1;
+    setLoading(false);
+    setRecords([]);
+    void deleteGenerationsThrough(scope, kind, cutoff);
+  }, [scope, kind]);
 
   return { records, loading, record, remove, clear };
 }

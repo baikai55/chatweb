@@ -10,7 +10,7 @@
 | 模块 | 文件 | 状态 |
 |---|---|---|
 | SSE 解析 | `src/transport/sse.ts` | ✅ 含 90s 静默超时、8MB 缓冲上限 |
-| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 纯文本已在两个后端实测；多模态请求体有单测，待真后端 |
+| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 原生/函数联网、工具循环、多模态请求体有单测；待真后端 |
 | 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状；费解的报错补人话，有单测 |
 | 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod |
 | 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
@@ -18,23 +18,70 @@
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
 | 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条；列表 portal 到侧栏 |
 | Markdown + XSS 清洗 | `src/features/console/markdown.ts` | ✅ 从 grok2api 移植 |
-| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/图片选择·粘贴·拖拽/单条消息操作 |
+| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/图片输入/可选麦克风转写/单条消息操作 |
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
 | 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
 | 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 参数控制、URL/Base64、流式兼容、预览与下载 |
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
-| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、声线、播放下载与转写；不再按方言拦人 |
-| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类覆盖、图片路由、行为设置、删除全部记录 |
+| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、麦克风录音、声线、播放下载与转写；不再按方言拦人 |
+| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类/联网方式覆盖、图片路由、联网源、独立语音设置、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
-| 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知、图片等待上限 |
-| Worker | `worker/*.ts` | ✅ R2 上传往返字节一致、路径穿越已挡、CSP 已下发 |
+| 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知、图片等待上限、函数搜索源 |
+| Worker | `worker/*.ts` | ✅ R2 上传、搜索聚合/鉴权/响应上限、路径穿越、CSP |
 
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
 同时修正了聊天默认模型候选：聊天会话只使用已保存的 chat 模型，不会误选图片或视频模型。
 
-本轮运行过 `pnpm check`、`pnpm test` 和 `pnpm build`，均通过；5 个测试文件
-59 个用例全过。Vite 仅提示主包超过 500 KB，不影响构建产物。
+## 本轮（混合联网搜索与 function tool）
+
+- 每个已保存的聊天模型在「模型」设置中独立选择「自动 / 原生 / 函数」。自动路由 Gemini 到 `google_search`、Grok 到原生 `web_search`，其他模型走标准 `type:"function"` 的 `web_search`；手动选择会覆盖自动路由。
+- 函数路径在 `src/transport/chat-completions.ts` 内维护 `assistant.tool_calls -> /__api/search -> role:tool` 循环，按流式 `index` 拼接参数；每个用户问题最多处理两次搜索调用，重复查询复用结果，搜索失败也回填为工具结果；中间工具消息不写入 IndexedDB 历史。
+- `worker/search.ts` 支持 Exa、Bing RSS、DuckDuckGo、SearXNG、Tavily、Serper 和自动兜底。`auto` 优先直调匿名 Exa MCP 的 `web_search_exa`，只在失败或无条目时继续；查询只规范 Unicode 和空白，不做语义改写或相关性猜测。入口同时限制查询/请求/响应大小，校验公网地址与重定向，并沿用同源或 token 鉴权。
+- 「联网」设置保存函数搜索源、API key 和自定义 SearXNG 地址；原生搜索不读取这些配置。Worker 侧可用 `SEARCH_*` 环境变量提供默认值。
+
+当前工作树运行过 `pnpm check`、`pnpm test` 和 `pnpm build`，均通过；19 个测试文件
+176 个用例全过。Vite 仅提示主包超过 500 KB，不影响构建产物。
+
+## 本轮（浏览器录音与聊天语音输入）
+
+- 设置页新增独立「语音」标签，集中放聊天麦克风开关、全局录音操作方式，以及当前后端的聊天 STT 模型。聊天麦克风默认关闭，录音默认「按住说话」；也可改成点击开始/再次点击停止。
+- `BrowserAudioRecorder` 是不依赖 React 的录音状态机，处理权限迟到、重复停止、最短时长、空音频、编码格式、stop watchdog 和所有媒体轨道释放；React Hook 额外在卸载、页面隐藏和 `pagehide` 时清理。
+- `AudioRecorderButton` 同时支持 Pointer Events、pointer capture、键盘 Enter/Space 和屏幕阅读器虚拟点击。聊天输入框与语音页共用该组件，录音文件支持 WebM/Opus、Ogg/Opus 和 M4A。
+- 聊天录音只使用当前后端明确选择且仍有效的 STT 模型，自动识别语言，结果以函数式更新追加到当前草稿，不自动发送。STT 使用独立的 AbortController 和会话序列号；切会话、切后端、离开聊天页或主动取消时，迟到结果不会写进新会话。
+- 语音页录完后复用已有文件校验、预览和手动提交转写流程。实时语音通话仍暂缓。
+
+录音、音频文件、STT 传输、设置迁移和草稿合并等相关 8 个测试文件共 59 项通过；真麦克风交互仍需在 HTTPS/localhost 的浏览器环境做人工冒烟。
+
+## 上一轮（语音现有链路修复；当时麦克风与实时通话暂不实施）
+
+用户当时明确下一阶段想做「语音输入、麦克风录音、实时语音通话」，但要求先把协议和产品
+形态沟通清楚，所以该轮没有提前实现。也没有新增语音自定义路由：现在只有图片支持请求
+路线/自定义格式；语音仍走 grok2api 原生 `/tts`、`/stt`、`/tts/voices`。
+
+本轮先修了现有语音页的确定性问题：
+
+- `capabilities=[]` 代表首次未配置、全部显示。此前点击一个亮着的能力会反向变成
+  「只开启这一项」；现在会正确按「全部减去该项」处理，并至少保留一个工作区入口。
+- STT 选文件和提交前都会校验空文件、100 MB 浏览器安全上限、音频 MIME/扩展名和
+  常见容器文件头，页面明确列出接受的格式；这不是上游能力探测，上游更小的限制仍
+  以真实响应为准。
+- 「返回时间戳」此前只发 `with_timestamps`，但结果类型、解析、UI、历史都不承接，
+  且已知部署会 503；本轮从 UI 移除，底层可选参数保留给以后明确协议后使用。
+- 语音请求运行时，侧栏历史的新建、打开、删除、清空全部禁用，避免切模式后取消按钮
+  消失以及旧请求覆盖历史选择。历史回放会恢复完整 TTS 文本、模型、声线、语言、语速、
+  格式、时长，以及 STT 的模型、选择语言、识别语言、时长和词级结果。
+- 生成历史异步首读不再覆盖加载期间刚产生的新记录；内存与 IndexedDB 都限制为最新
+  50 条。长 TTS 文本仍用 40 字标题显示，但全文单独存在 params，回放不会再截断。
+- 传输层修正了 `application/octet-stream` 压过所选 codec、URL/base64 歧义、data URL
+  MIME 未规范化的问题，并补齐声线、TTS 多种响应、STT FormData/响应、错误和取消测试。
+
+新增 4 个测试文件、29 个用例；全套现为 9 个测试文件、88 个用例。修复时不需要真实
+API Key，也没有读取或写入用户密钥。真后端验证时让用户把 Key 放在本地未跟踪配置或
+页面设置，不要在聊天里传明文。
+
+最终验证：`pnpm check`、`pnpm test`（88/88）、`pnpm build`、`git diff --check` 均通过；
+构建只有既有的主包超过 500 KB 提示。
 
 ## 本轮（对话支持带图）
 
@@ -138,7 +185,7 @@
 opencode 把搜索做成**由客户端执行的 function tool**（模型发调用，opencode 自己
 去搜再把结果喂回去），这里发的是 `{type:"web_search"}` 请**上游**用它的内置搜索。
 上游没有内置搜索时前者仍然可用。要做到一样得实现工具调用循环 + 一个搜索源，
-**没做，也没偷偷做**。
+**当时没做，也没偷偷做；本轮已在顶部「混合联网搜索与 function tool」中完成。**
 
 **3. 消息操作改成点开，加了复制和重新生成**（反馈：「不要一直显示着。
 点一下在显示，点别的地方隐藏好了。再加个复制，刷新吧。看的是移动端」）：

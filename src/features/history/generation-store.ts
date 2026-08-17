@@ -44,7 +44,7 @@ export type GenerationRecord = {
 };
 
 /** 每个后端每个面板留多少条。存的是二进制，但生图一条能有四张，别无上限。 */
-const MAX_PER_KIND = 50;
+export const MAX_GENERATIONS_PER_KIND = 50;
 
 export function createGenerationId(): string {
   return `g_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -102,14 +102,30 @@ export async function deleteGeneration(id: string): Promise<void> {
   }
 }
 
+/** 删除一次“清空”发生之前的当前后端/面板记录，不误删清空后新生成的结果。 */
+export async function deleteGenerationsThrough(
+  scope: string,
+  kind: GenerationKind,
+  createdAt: number,
+): Promise<void> {
+  try {
+    const rows = await idbGetByPrefix<GenerationRecord>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
+    await Promise.all(rows
+      .filter((record) => record.createdAt <= createdAt)
+      .map((record) => idbDelete(STORE_GENERATIONS, record.id)));
+  } catch {
+    // 忽略；与单条删除一样，存储失败不阻断当前界面
+  }
+}
+
 /** 超出上限时清理最旧的。保存后异步调一下即可，不用等。 */
 export async function pruneGenerations(scope: string, kind: GenerationKind): Promise<void> {
   try {
     const rows = await idbGetByPrefix<GenerationRecord>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
-    if (rows.length <= MAX_PER_KIND) return;
+    if (rows.length <= MAX_GENERATIONS_PER_KIND) return;
     const excess = rows
       .sort((a, b) => a.createdAt - b.createdAt)
-      .slice(0, rows.length - MAX_PER_KIND);
+      .slice(0, rows.length - MAX_GENERATIONS_PER_KIND);
     await Promise.all(excess.map((record) => idbDelete(STORE_GENERATIONS, record.id)));
   } catch {
     // 忽略
