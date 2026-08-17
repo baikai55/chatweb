@@ -67,9 +67,11 @@ describe("resolveImageRoute", () => {
     });
   });
 
-  it("size 有值时不发 aspect_ratio —— 两个一起发多数后端会报冲突", () => {
-    const route = resolveImageRoute(backend(), { ...CONTEXT, aspectRatio: "16:9" });
-    expect(JSON.parse(route.body ?? "")).not.toHaveProperty("aspect_ratio");
+  it("size 包括 auto 都原样发送，且不与 aspect_ratio 同时出现", () => {
+    const route = resolveImageRoute(backend(), { ...CONTEXT, size: "auto", aspectRatio: "16:9" });
+    const body = JSON.parse(route.body ?? "");
+    expect(body.size).toBe("auto");
+    expect(body).not.toHaveProperty("aspect_ratio");
   });
 
   it("没给 size 时才发 aspect_ratio", () => {

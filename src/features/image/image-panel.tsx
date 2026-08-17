@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   Images,
   Loader2,
+  Maximize2,
   Square,
   TriangleAlert,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelPicker } from "@/features/console/model-picker";
+import { ImageViewer } from "@/features/image/image-viewer";
 import { GenerationHistory } from "@/features/history/generation-history";
 import { hydrateAssets, toAsset, type GenerationRecord } from "@/features/history/generation-store";
 import { useGenerationHistory } from "@/features/history/use-generation-history";
@@ -42,7 +44,14 @@ const DIMENSION_MODES: Array<SelectOption<DimensionMode>> = [
   { value: "size", label: "按尺寸" },
   { value: "aspect_ratio", label: "按比例" },
 ];
-const SIZES = ["1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792"];
+const SIZES: Array<SelectOption<string>> = [
+  { value: "auto", label: "自适应" },
+  { value: "1024x1024", label: "1024x1024" },
+  { value: "1536x1024", label: "1536x1024" },
+  { value: "1024x1536", label: "1024x1536" },
+  { value: "1792x1024", label: "1792x1024" },
+  { value: "1024x1792", label: "1024x1792" },
+];
 const ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"];
 const QUALITIES: Array<SelectOption<Quality>> = [
   { value: "default", label: "默认质量" },
@@ -76,14 +85,16 @@ export function ImagePanel({
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState<Count>("1");
   const [dimensionMode, setDimensionMode] = useState<DimensionMode>("size");
-  const [size, setSize] = useState("1024x1024");
+  const [size, setSize] = useState("auto");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("default");
   const [responseFormat, setResponseFormat] = useState<ImageResponseFormat>("url");
   const [images, setImages] = useState<ImageResult[]>([]);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settings = useAppSettings();
 
   const history = useGenerationHistory(backend.id, "image");
@@ -94,6 +105,7 @@ export function ImagePanel({
   useEffect(() => () => releaseRef.current?.(), []);
 
   function showRecord(record: GenerationRecord): void {
+    setPreviewIndex(null);
     releaseRef.current?.();
     const { urls, release } = hydrateAssets(record);
     releaseRef.current = release;
@@ -105,13 +117,14 @@ export function ImagePanel({
 
   function startNew(): void {
     if (pending) return;
+    setPreviewIndex(null);
     releaseRef.current?.();
     releaseRef.current = null;
     setSelectedModel(imageModels[0]?.id ?? "");
     setPrompt("");
     setCount("1");
     setDimensionMode("size");
-    setSize("1024x1024");
+    setSize("auto");
     setAspectRatio("1:1");
     setQuality("default");
     setResponseFormat("url");
@@ -151,6 +164,7 @@ export function ImagePanel({
     abortRef.current = controller;
     setPending(true);
     setError("");
+    setPreviewIndex(null);
     setImages([]);
     releaseRef.current?.();
     releaseRef.current = null;
@@ -249,7 +263,15 @@ export function ImagePanel({
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2" aria-live="polite">
               {images.map((image, index) => (
-                <ImageCard key={`${image.url.slice(0, 80)}-${index}`} image={image} index={index} />
+                <ImageCard
+                  key={`${image.url.slice(0, 80)}-${index}`}
+                  image={image}
+                  index={index}
+                  onPreview={(trigger) => {
+                    previewTriggerRef.current = trigger;
+                    setPreviewIndex(index);
+                  }}
+                />
               ))}
             </div>
           )}
@@ -299,7 +321,7 @@ export function ImagePanel({
               {effectiveDimension === "size" && canSize ? (
                 <CompactSelect
                   value={size}
-                  options={SIZES.map((value) => ({ value, label: value }))}
+                  options={SIZES}
                   onChange={setSize}
                   ariaLabel="图片尺寸"
                   disabled={pending}
@@ -352,6 +374,16 @@ export function ImagePanel({
           </div>
         </div>
       </form>
+
+      {previewIndex !== null && images[previewIndex] ? (
+        <ImageViewer
+          image={images[previewIndex]}
+          index={previewIndex}
+          total={images.length}
+          onClose={() => setPreviewIndex(null)}
+          returnFocus={previewTriggerRef.current}
+        />
+      ) : null}
     </div>
   );
 }
@@ -376,17 +408,33 @@ function LoadingState() {
   );
 }
 
-function ImageCard({ image, index }: { image: ImageResult; index: number }) {
+function ImageCard({
+  image,
+  index,
+  onPreview,
+}: {
+  image: ImageResult;
+  index: number;
+  onPreview: (trigger: HTMLButtonElement) => void;
+}) {
   return (
     <figure className="min-w-0 overflow-hidden rounded-lg border bg-card p-2">
-      <div className="flex min-h-52 items-center justify-center overflow-hidden rounded-md bg-secondary">
+      <button
+        type="button"
+        aria-label={`放大查看图片 ${index + 1}`}
+        onClick={(event) => onPreview(event.currentTarget)}
+        className="group relative flex min-h-52 w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-md bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
         <img
           src={image.url}
           alt={`生成图片 ${index + 1}`}
-          className="max-h-[65vh] w-full object-contain"
+          className="pointer-events-none max-h-[65vh] w-full object-contain"
           loading="lazy"
         />
-      </div>
+        <span className="pointer-events-none absolute right-2 top-2 flex size-8 items-center justify-center rounded-md bg-black/65 text-white shadow-sm transition-colors group-hover:bg-black/80" aria-hidden="true">
+          <Maximize2 className="size-4" />
+        </span>
+      </button>
       <figcaption className="flex min-w-0 items-center gap-2 px-1 pt-2">
         <span
           className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
