@@ -1,6 +1,13 @@
 import { TransportError, isRecord, parseJSON, toTransportError, firstString } from "@/transport/errors";
 import { isErrorFrame, readSSE } from "@/transport/sse";
-import type { ChatRequestOptions, ChatStreamResult, ChatStreamSnapshot, ChatToolActivity, ReasoningEffort } from "@/transport/types";
+import {
+  readChatContentText,
+  type ChatRequestOptions,
+  type ChatStreamResult,
+  type ChatStreamSnapshot,
+  type ChatToolActivity,
+  type ReasoningEffort,
+} from "@/transport/types";
 
 /**
  * OpenAI chat/completions 适配器。
@@ -165,9 +172,10 @@ async function consumeStream(response: Response, onUpdate?: (snapshot: ChatStrea
     const delta = isRecord(choice.delta) ? choice.delta : undefined;
     if (!delta) continue;
 
-    if (typeof delta.content === "string") {
-      text += delta.content;
-    }
+    // 标准流式响应是字符串；少数兼容层会把增量包成 text part，
+    // 与非流式 message.content 的多模态形状保持同一套解包逻辑。
+    const contentDelta = readChatContentText(delta.content);
+    if (contentDelta) text += contentDelta;
 
     const reasoningDelta = readReasoningDelta(delta);
     if (reasoningDelta) reasoning += reasoningDelta;
@@ -247,7 +255,9 @@ function readNonStreamResponse(response: Response, responseText: string): ChatSt
   const choice = choices.length > 0 && isRecord(choices[0]) ? choices[0] : undefined;
   const message = choice && isRecord(choice.message) ? choice.message : undefined;
 
-  const text = firstString(message?.content);
+  // 视觉模型有时把回复文本包成 [{type:"text",text:"..."}]，
+  // 不能只用 firstString，否则会被误判为空响应。
+  const text = readChatContentText(message?.content);
   const reasoning = firstString(message?.reasoning_content, message?.reasoning, message?.thinking);
   if (!text && !reasoning) {
     throw new TransportError(response.status, "上游没有返回任何可显示的内容", "empty_response");

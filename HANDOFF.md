@@ -5,12 +5,12 @@
 
 ## 已完成且验证过
 
-跑过 `pnpm check` 和 `pnpm build`，都干净。Worker 用 `wrangler dev` 实跑过。
+跑过 `pnpm check`、`pnpm test` 和 `pnpm build`，都干净。Worker 用 `wrangler dev` 实跑过。
 
 | 模块 | 文件 | 状态 |
 |---|---|---|
 | SSE 解析 | `src/transport/sse.ts` | ✅ 含 90s 静默超时、8MB 缓冲上限 |
-| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 两个后端实测通过 |
+| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 纯文本已在两个后端实测；多模态请求体有单测，待真后端 |
 | 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状；费解的报错补人话，有单测 |
 | 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod |
 | 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
@@ -18,7 +18,7 @@
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
 | 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条；列表 portal 到侧栏 |
 | Markdown + XSS 清洗 | `src/features/console/markdown.ts` | ✅ 从 grok2api 移植 |
-| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/单条消息复制·重生成·删除 |
+| 聊天面板 | `src/features/console/chat-panel.tsx` | ✅ 流式/推理/工具/停止/错误/图片选择·粘贴·拖拽/单条消息操作 |
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
 | 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
@@ -33,10 +33,46 @@
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
 同时修正了聊天默认模型候选：聊天会话只使用已保存的 chat 模型，不会误选图片或视频模型。
 
-本轮再次运行过 `pnpm check` 和 `pnpm build`，均通过。Vite 仅提示主包超过
-500 KB，不影响构建产物。
+本轮运行过 `pnpm check`、`pnpm test` 和 `pnpm build`，均通过；5 个测试文件
+59 个用例全过。Vite 仅提示主包超过 500 KB，不影响构建产物。
 
-## 本轮（实测反馈：图片超时可调 + 消息操作改成点开 + 侧栏清空）
+## 本轮（对话支持带图）
+
+用户反馈「现在对话不能带图」。已把图片输入完整接进聊天链路，不借用生图面板，
+也不依赖 Worker/R2。`pnpm check` / `pnpm build` 干净，`pnpm test` 59 个用例全过。
+
+**1. 根因是协议类型只允许字符串**：`ChatMessage.content` 原来写死成 `string`，
+所以 UI 就算选到图片也没有合法形状能发。现在 `src/transport/types.ts` 同时接受旧的
+字符串和 OpenAI Vision 内容数组：`{type:"text",text}` +
+`{type:"image_url",image_url:{url,detail}}`。没有图片时仍发字符串，旧会话和只认
+纯文本的后端不受影响；有图片时 `buildRequestBody` 原样透传内容数组。
+
+`readChatContentText()` 统一从两种形状取文字，聊天标题、复制、Markdown，以及少数
+后端返回的流式/非流式 text part 数组都走这一个入口，不会把结构化回复误判成空。
+
+**2. 输入端是移动端也能用的一整套交互**：输入框旁加图片按钮（`multiple` +
+`accept="image/*"`），同时支持粘贴截图和拖拽；发送前显示固定尺寸缩略图，可逐张移除。
+允许纯图片消息。发送后先把用户消息落到会话再发请求，所以图片立即出现在消息流里，
+首个响应片段前停止也不会把它弄丢。历史回看、删除和重新生成直接复用消息里的内容数组。
+
+**3. 图片以内联 data URL 保存**：聊天本来就直连用户配置的后端，data URL 可以直接
+进入标准 `image_url.url`，不需要先把私人图片传到 R2 变成公网地址。内容数组随会话
+存进 IndexedDB，无需升级数据库；刷新后仍能显示和重发。代价是 Base64 比原图大约
+三分之一，所以限制为每条最多 4 张、单张 10 MB、原始文件合计 20 MB。
+
+只接受明确的栅格图片 MIME 和 `data:image/...;base64,`；SVG data URL 被拒绝，避免
+把主动内容存进历史再通过原图链接打开。能力仍然**不按模型名猜**：任何聊天模型都能
+选图，不支持视觉输入就让上游返回真实错误。
+
+**4. 顺手收紧了请求生命周期**：切会话、删当前会话、清空或切后端会中止并失效旧请求，
+旧响应不能再把已删会话写回来；同步请求引用也挡住了 React 状态刷新前的快速双击，
+避免视觉请求重复扣额度。停止时不再在 state updater 里做持久化副作用。
+
+**测试**：`chat-completions.test.ts` 新增 3 个多模态用例，覆盖内容数组无损透传、
+旧字符串共存、非流式 text part 响应和实际 fetch 请求体；新增
+`chat-store.test.ts` 3 个用例，覆盖旧文本标题、多模态标题和纯图片标题。全套 59 个。
+
+## 上一轮（实测反馈：图片超时可调 + 消息操作改成点开 + 侧栏清空）
 
 用户在真机（移动端）用起来之后的四条反馈。`pnpm check` / `pnpm build` 干净，
 `pnpm test` 53 个用例全过。
@@ -93,7 +129,7 @@ opencode 把搜索做成**由客户端执行的 function tool**（模型发调�
 而按钮就贴在标题旁，移动端误触没有找补余地；弹确认框对一个列表标题旁的
 小按钮又太重。放着不管就是取消，不用另找地方点"否"。
 
-## 上一轮（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
+## 更早（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
 
 四件用户反馈，都做完了。`pnpm check` / `pnpm build` 干净，`pnpm test` 44 个用例全过。
 
@@ -169,7 +205,7 @@ opencode 把搜索做成**由客户端执行的 function tool**（模型发调�
 和搜索工具（关着不发 / Gemini 特殊形状 / 认不出也照发通用形状）。
 全套 44 个。
 
-## 更早（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
+## 更更早（删掉能力探测 + 获取模型按钮 + 四面板历史记录）
 
 三件用户点名的事，都做完了。`pnpm check`、`pnpm build` 干净，`pnpm test` 35 个用例全过。
 
@@ -232,7 +268,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 清掉所有后端的对话和生成记录，**但不动后端配置、密钥和模型缓存** ——
 那些删了得重新填一遍，跟「清历史」不是一回事。清完通过 `historyToken` 让会话 hook 重载。
 
-## 更更早（设置页重做 + 图片路由）
+## 更更更早（设置页重做 + 图片路由）
 
 用户点名要借鉴 `gpt-image-playground`，选了四块全做。都做完了，`pnpm check`、
 `pnpm build`、`pnpm test` 干净。设置页从 `app.tsx` 里搬进
@@ -321,25 +357,30 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 
 ## 当前仍需验证/继续做
 
-1. 部署环境验证视频源文件经 `/__api/upload` 上传到 R2 后，上游能否读取公网 URL。
+1. **本轮新增，待真后端/真机**：用一个确定支持视觉输入的聊天模型各发一次
+   「单图 + 文字」和纯图片，确认 CPA / grok2api 对 data URL 的实际接受形状；再在移动端
+   检查相册选择、粘贴、缩略图移除、停止和刷新历史。不要扫模型或参数矩阵。
+   另外观察几轮大图后的 IndexedDB 占用；当前有 4 张 / 单张 10 MB / 合计 20 MB 保护，
+   但 data URL 仍比原图大约三分之一，真机内存和浏览器配额只能实测。
+2. 部署环境验证视频源文件经 `/__api/upload` 上传到 R2 后，上游能否读取公网 URL。
    （本地没法验，必须真部署一次。）
-2. 检查三个媒体面板的移动端布局、暗色模式、取消操作和错误状态。
+3. 检查三个媒体面板的移动端布局、暗色模式、取消操作和错误状态。
    代码层面读过一遍没发现问题，但没有真机/窄视口实测过。
    **本轮新增的设置页四个标签页也在此列** —— 标签栏在窄屏是否需要横向滚动没实测。
-3. **图片路由只做过单测，没打过真后端**。特别是这两条：
+4. **图片路由只做过单测，没打过真后端**。特别是这两条：
    - CPA 上把 Nano Banana 的路由切成 `chat`，看能不能真出图、图片在响应的哪个位置
      （通用提取够不够，还是得填 `imageUrlPaths`）。
    - grok2api 走 `chat` 路由生图。用户说它支持这个格式，但没验过响应形状。
    验的时候记住下面那条红线，一次一个请求，不要扫参数。
-4. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
-5. **本轮新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
+5. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
+6. **此前新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
    带着旧会话数据的库升级没验；生成记录攒满 50 条后的裁剪也只是代码层面正确。
    还有 `hydrateAssets` 的 `blob:` URL 释放 —— 逻辑对，但没在真实使用中观察过内存。
-6. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
+7. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
    CPA 的 `/responses` 和 `/messages` 都确认存在（上一轮实测：无鉴权 401、带 key 400），
    要做的话有端点可打。目前只实现了 chat/completions。
    顺带这也是联网搜索给 Claude 补上的前提 —— 得走 `/v1/messages`。
-7. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
+8. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
    真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
 
 ## ⚠️ 联调时的红线
@@ -413,6 +454,11 @@ grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准
 
 ## 踩过的坑（别重复踩）
 
+- **聊天带图和生图不是一条链路**。聊天图片是输入，走
+  `messages[].content[].image_url.url`；生图面板是输出，走可配的图片路由。
+  聊天直连后端，内联 data URL 不需要 `/__api/upload` 或 R2。不要为了复用视频上传
+  把私人图片先变成公网 URL。data URL 会膨胀约三分之一，改数量/大小限制时要同时考虑
+  `JSON.stringify`、fetch 和 IndexedDB 结构化克隆造成的多份内存；SVG data URL 不放行。
 - **Nano Banana 系列在 CPA 上不能走 `/images/generations`**。它们确实是图片模型，
   分类没错，但 CPA 明确拒绝：
   `Model Nano Banana Pro is not supported on /v1/images/generations or /v1/images/edits.

@@ -1,5 +1,5 @@
-import { ArrowUp, BrainCircuit, Copy, Globe, Loader2, RefreshCw, Square, Trash2, TriangleAlert, Wrench } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Loader2, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ import type { Backend } from "@/backends/types";
 import type { CatalogModel } from "@/backends/model-catalog";
 import { streamChatCompletions, inferVendor, webSearchNote } from "@/transport/chat-completions";
 import { isAbortError } from "@/transport/errors";
-import type { ChatStreamSnapshot, ReasoningEffort } from "@/transport/types";
+import { readChatContentText, type ChatContentPart, type ChatMessageContent, type ChatStreamSnapshot, type ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
@@ -27,6 +27,99 @@ import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/sett
 import { cn } from "@/shared/lib/cn";
 
 const REASONING_LEVELS: ReasoningEffort[] = ["auto", "none", "low", "medium", "high", "xhigh"];
+
+/** 单次聊天最多带 4 张图片，每张不超过 10 MiB。data URL 会随会话落进 IndexedDB，
+ * 过大的原图既会拖慢请求，也容易把移动端内存顶满。 */
+const MAX_CHAT_IMAGES = 4;
+const MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_CHAT_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
+const CHAT_IMAGE_MIME = /^image\/(?:png|jpe?g|gif|webp|avif|bmp|x-ms-bmp|heic|heif)$/i;
+const CHAT_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-ms-bmp|heic|heif);base64,/i;
+
+type PendingImage = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+};
+
+type DisplayContent = {
+  text: string;
+  imageUrls: string[];
+};
+
+function splitMessageContent(content: ChatMessageContent): DisplayContent {
+  if (typeof content === "string") return { text: content, imageUrls: [] };
+
+  const text: string[] = [];
+  const imageUrls: string[] = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      text.push(part.text);
+    } else if (part.type === "image_url" && isSafeImageUrl(part.image_url.url)) {
+      imageUrls.push(part.image_url.url);
+    }
+  }
+  return { text: text.join(""), imageUrls };
+}
+
+function isSafeImageUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value) || CHAT_IMAGE_DATA_URL.test(value);
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type) return CHAT_IMAGE_MIME.test(file.type);
+  return /\.(?:avif|gif|jpe?g|png|webp|bmp|heic|heif)$/i.test(file.name);
+}
+
+function inferImageMime(file: File): string {
+  if (CHAT_IMAGE_MIME.test(file.type)) return file.type.toLowerCase();
+  const extension = /\.([^.]+)$/.exec(file.name)?.[1]?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "bmp") return "image/bmp";
+  return extension ? `image/${extension}` : "";
+}
+
+function readImageFile(file: File): Promise<PendingImage> {
+  return new Promise((resolve, reject) => {
+    const mime = inferImageMime(file);
+    if (!CHAT_IMAGE_MIME.test(mime)) {
+      reject(new Error(`「${file.name || "图片"}」不是支持的图片格式`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`读取「${file.name || "图片"}」失败`));
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (!CHAT_IMAGE_DATA_URL.test(dataUrl)) {
+        reject(new Error(`「${file.name || "图片"}」不是可读取的图片`));
+        return;
+      }
+      resolve({
+        id: createMessageId(),
+        name: file.name || "图片",
+        type: mime,
+        size: file.size,
+        dataUrl,
+      });
+    };
+    // 少数浏览器不给 AVIF/HEIC 等扩展名补 MIME；给 Blob 切片补上，
+    // 否则 FileReader 会产出 application/octet-stream，后续无法作为视觉输入。
+    reader.readAsDataURL(file.type ? file : file.slice(0, file.size, mime));
+  });
+}
+
+function buildUserContent(text: string, images: PendingImage[]): ChatMessageContent {
+  if (images.length === 0) return text;
+
+  const parts: ChatContentPart[] = [];
+  if (text) parts.push({ type: "text", text });
+  for (const image of images) {
+    parts.push({ type: "image_url", image_url: { url: image.dataUrl, detail: "auto" } });
+  }
+  return parts;
+}
 
 export function ChatPanel({
   backend,
@@ -43,6 +136,9 @@ export function ChatPanel({
   onManage: () => void;
 }) {
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [readingImages, setReadingImages] = useState(0);
+  const [draggingImages, setDraggingImages] = useState(false);
   const [streaming, setStreaming] = useState<ChatStreamSnapshot | null>(null);
   const [error, setError] = useState("");
   /**
@@ -54,22 +150,166 @@ export function ChatPanel({
    */
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const streamSnapshotRef = useRef<ChatStreamSnapshot | null>(null);
+  const requestSequenceRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dragDepthRef = useRef(0);
+  const readingImageStatsRef = useRef({ count: 0, bytes: 0 });
+  const currentSessionIdRef = useRef(session.id);
+  currentSessionIdRef.current = session.id;
   const settings = useAppSettings();
+
+  // 草稿属于当前会话。切换历史时丢掉尚未发送的图片，避免误发到另一段对话。
+  useEffect(() => {
+    setPendingImages([]);
+    setReadingImages(0);
+    setDraggingImages(false);
+    setStreaming(null);
+    setError("");
+    dragDepthRef.current = 0;
+    readingImageStatsRef.current = { count: 0, bytes: 0 };
+    streamSnapshotRef.current = null;
+
+    return () => {
+      // 切会话、删当前会话或切后端时，旧请求不能再把旧会话写回当前界面。
+      requestSequenceRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, [backend.id, session.id]);
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
   const search = webSearchNote(model);
 
+  const addImageFiles = useCallback((incoming: FileList | File[]) => {
+    const files = Array.from(incoming);
+    if (files.length === 0) return;
+    const targetSessionId = session.id;
+
+    const imageFiles = files.filter(isImageFile);
+    if (imageFiles.length < files.length) {
+      toast.error("只支持图片文件，其他文件已忽略");
+    }
+
+    const reading = readingImageStatsRef.current;
+    const available = MAX_CHAT_IMAGES - pendingImages.length - reading.count;
+    if (available <= 0) {
+      toast.error("一条消息最多带 " + MAX_CHAT_IMAGES + " 张图片");
+      return;
+    }
+
+    const selected = imageFiles.slice(0, available);
+    if (imageFiles.length > available) {
+      toast.error("一条消息最多带 " + MAX_CHAT_IMAGES + " 张图片，多余的已忽略");
+    }
+
+    const withinPerImageLimit = selected.filter((file) => file.size <= MAX_CHAT_IMAGE_BYTES);
+    if (withinPerImageLimit.length < selected.length) {
+      toast.error("单张图片不能超过 10 MB，超出的已忽略");
+    }
+
+    const pendingBytes = pendingImages.reduce((total, image) => total + image.size, 0);
+    let selectedBytes = 0;
+    let totalLimitReached = false;
+    const valid = withinPerImageLimit.filter((file) => {
+      if (pendingBytes + reading.bytes + selectedBytes + file.size > MAX_CHAT_IMAGE_TOTAL_BYTES) {
+        totalLimitReached = true;
+        return false;
+      }
+      selectedBytes += file.size;
+      return true;
+    });
+    if (totalLimitReached) {
+      toast.error("一条消息里的图片合计不能超过 20 MB，超出的已忽略");
+    }
+    if (valid.length === 0) return;
+
+    readingImageStatsRef.current = {
+      count: reading.count + valid.length,
+      bytes: reading.bytes + selectedBytes,
+    };
+    setReadingImages((count) => count + valid.length);
+    void Promise.allSettled(valid.map(readImageFile)).then((results) => {
+      if (currentSessionIdRef.current !== targetSessionId) return;
+      const loaded = results
+        .filter((result): result is PromiseFulfilledResult<PendingImage> => result.status === "fulfilled")
+        .map((result) => result.value);
+      if (loaded.length > 0) {
+        setPendingImages((current) => [...current, ...loaded].slice(0, MAX_CHAT_IMAGES));
+      }
+      if (loaded.length < valid.length) {
+        toast.error("有图片读取失败，请重试");
+      }
+    }).finally(() => {
+      if (currentSessionIdRef.current !== targetSessionId) return;
+      const current = readingImageStatsRef.current;
+      readingImageStatsRef.current = {
+        count: Math.max(0, current.count - valid.length),
+        bytes: Math.max(0, current.bytes - selectedBytes),
+      };
+      setReadingImages((count) => Math.max(0, count - valid.length));
+    });
+  }, [pendingImages.length, session.id]);
+
+  function removePendingImage(id: string) {
+    setPendingImages((current) => current.filter((image) => image.id !== id));
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.toLowerCase().startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
+    event.preventDefault();
+    addImageFiles(files);
+  }
+
+  function handleDragEnter(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    setDraggingImages(true);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!draggingImages) setDraggingImages(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDraggingImages(false);
+  }
+
+  function handleDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setDraggingImages(false);
+    if (event.dataTransfer.files.length > 0) addImageFiles(event.dataTransfer.files);
+  }
+
   const stop = useCallback(() => {
     abortRef.current?.abort();
-    abortRef.current = null;
   }, []);
 
   async function send(messages: ConversationMessage[], base: ChatSession) {
+    const sequence = requestSequenceRef.current + 1;
+    requestSequenceRef.current = sequence;
     const controller = new AbortController();
     abortRef.current = controller;
+    const initialSnapshot: ChatStreamSnapshot = { text: "", reasoning: "", tools: [] };
+    streamSnapshotRef.current = initialSnapshot;
     setError("");
-    setStreaming({ text: "", reasoning: "", tools: [] });
+    setStreaming(initialSnapshot);
+    const isCurrentRequest = () => (
+      requestSequenceRef.current === sequence && currentSessionIdRef.current === base.id
+    );
 
     try {
       const result = await streamChatCompletions({
@@ -81,10 +321,15 @@ export function ChatPanel({
         webSearch: base.webSearch,
         flavor: backend.flavor,
         vendor: inferVendor(base.model),
-        onUpdate: setStreaming,
+        onUpdate: (snapshot) => {
+          if (!isCurrentRequest()) return;
+          streamSnapshotRef.current = snapshot;
+          setStreaming(snapshot);
+        },
         signal: controller.signal,
       });
 
+      if (!isCurrentRequest()) return;
       onCommit({
         ...base,
         messages: [...messages, {
@@ -99,42 +344,57 @@ export function ChatPanel({
       });
       notifyTaskDone("回复完成", result.text.slice(0, 120) || base.model);
     } catch (caught) {
+      if (!isCurrentRequest()) return;
       // 用户主动停止不算错误，但已经流出来的内容要保留下来
       if (isAbortError(caught)) {
-        setStreaming((snapshot) => {
-          if (snapshot && (snapshot.text || snapshot.reasoning)) {
-            onCommit({
-              ...base,
-              messages: [...messages, {
-                id: createMessageId(),
-                role: "assistant",
-                content: snapshot.text,
-                reasoning: snapshot.reasoning || undefined,
-              }],
-              updatedAt: Date.now(),
-            });
-          }
-          return null;
-        });
+        const snapshot = streamSnapshotRef.current;
+        if (snapshot && (snapshot.text || snapshot.reasoning)) {
+          onCommit({
+            ...base,
+            messages: [...messages, {
+              id: createMessageId(),
+              role: "assistant",
+              content: snapshot.text,
+              reasoning: snapshot.reasoning || undefined,
+              tools: snapshot.tools.length > 0 ? snapshot.tools : undefined,
+              nativeFinishReason: snapshot.nativeFinishReason,
+            }],
+            updatedAt: Date.now(),
+          });
+        } else {
+          // `submit` 已经先落过用户消息；重新生成被停止时则在这里保留截断后的上下文。
+          onCommit({ ...base, messages, updatedAt: Date.now() });
+        }
         return;
       }
       setError(caught instanceof Error ? caught.message : String(caught));
       // 用户消息也要留住，否则报错后输入的内容就白打了
       onCommit({ ...base, messages, updatedAt: Date.now() });
     } finally {
-      abortRef.current = null;
-      setStreaming(null);
+      if (requestSequenceRef.current === sequence) {
+        abortRef.current = null;
+        streamSnapshotRef.current = null;
+        setStreaming(null);
+      }
     }
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || streaming || !model) return;
-    const userMessage: ConversationMessage = { id: createMessageId(), role: "user", content: text };
-    const base = { ...session, model };
+    if ((!text && pendingImages.length === 0) || readingImages > 0 || streaming || abortRef.current || !model) return;
+    const userMessage: ConversationMessage = {
+      id: createMessageId(),
+      role: "user",
+      content: buildUserContent(text, pendingImages),
+    };
+    const messages = [...session.messages, userMessage];
+    const base = { ...session, model, messages, updatedAt: Date.now() };
     setInput("");
-    void send([...base.messages, userMessage], base);
+    setPendingImages([]);
+    // 先落盘再请求：发送后的图片立即可见，首个响应片段前停止也不会丢消息。
+    onCommit(base);
+    void send(messages, base);
   }
 
   /**
@@ -154,7 +414,12 @@ export function ChatPanel({
     });
   }
 
-  async function copyMessage(text: string) {
+  async function copyMessage(content: ChatMessageContent) {
+    const text = readChatContentText(content);
+    if (!text) {
+      toast.error("这条消息没有可复制的文字");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(text);
       toast.success("已复制");
@@ -174,7 +439,7 @@ export function ChatPanel({
    * 丢掉的部分不进历史 —— 想留旧回复就先复制走。
    */
   function regenerateFrom(id: string) {
-    if (streaming) return;
+    if (streaming || abortRef.current) return;
     setSelectedId(null);
     const index = session.messages.findIndex((message) => message.id === id);
     if (index < 0) return;
@@ -196,7 +461,7 @@ export function ChatPanel({
   const rendered = useMemo(
     () => session.messages.map((message) => ({
       message,
-      html: message.role === "assistant" ? renderAssistantMarkup(message.content) : "",
+      html: message.role === "assistant" ? renderAssistantMarkup(readChatContentText(message.content)) : "",
     })),
     [session.messages],
   );
@@ -291,26 +556,91 @@ export function ChatPanel({
         </MessageScroller>
       </MessageScrollerProvider>
 
-      <form onSubmit={submit} className="shrink-0 px-3 pb-3">
-        <div className="mx-auto flex max-w-3xl items-end gap-2 overflow-hidden rounded-2xl border bg-card p-2 transition-colors focus-within:border-border-hover">
-          <Textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
-            rows={1}
-            disabled={models.length === 0}
-            className="max-h-40 min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
-          />
-          {streaming ? (
-            <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
-              <Square className="size-3.5 fill-current" />
-            </Button>
-          ) : (
-            <Button type="submit" size="icon" className="size-9 shrink-0 rounded-full" disabled={!input.trim() || !model}>
-              <ArrowUp className="size-4" />
-            </Button>
+      <form
+        onSubmit={submit}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className="shrink-0 px-3 pb-3"
+      >
+        <div
+          className={cn(
+            "relative mx-auto max-w-3xl overflow-hidden rounded-2xl border bg-card p-2 transition-colors focus-within:border-border-hover",
+            draggingImages && "border-primary bg-primary/5",
           )}
+        >
+          {draggingImages ? (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary bg-card/90 text-xs text-primary">
+              <ImagePlus className="size-4" />
+              松开以上传图片
+            </div>
+          ) : null}
+
+          {pendingImages.length > 0 ? (
+            <div className="mb-1.5 flex flex-wrap gap-2 px-1 pt-1">
+              {pendingImages.map((image) => (
+                <PendingImagePreview key={image.id} image={image} onRemove={() => removePendingImage(image.id)} />
+              ))}
+            </div>
+          ) : null}
+
+          <div className="flex items-end gap-1.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="sr-only"
+              tabIndex={-1}
+              onChange={(event) => {
+                if (event.target.files) addImageFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="添加图片"
+                  disabled={models.length === 0 || streaming !== null}
+                  className="size-9 shrink-0 rounded-full text-muted-foreground"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <ImagePlus className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>添加图片</TooltipContent>
+            </Tooltip>
+
+            <Textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={onKeyDown}
+              onPaste={handlePaste}
+              placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
+              rows={1}
+              disabled={models.length === 0}
+              className="max-h-40 min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
+            />
+            {streaming ? (
+              <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
+                <Square className="size-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                size="icon"
+                className="size-9 shrink-0 rounded-full"
+                disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || !model}
+                aria-label={readingImages > 0 ? "正在读取图片" : "发送"}
+              >
+                {readingImages > 0 ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+              </Button>
+            )}
+          </div>
         </div>
       </form>
     </div>
@@ -386,20 +716,42 @@ type BubbleActions = {
   onDelete?: () => void;
 };
 
+function PendingImagePreview({ image, onRemove }: { image: PendingImage; onRemove: () => void }) {
+  return (
+    <div
+      className="group/image relative size-16 shrink-0 overflow-hidden rounded-md border bg-secondary"
+      title={image.name}
+    >
+      <img src={image.dataUrl} alt={image.name} className="size-full object-cover" />
+      <button
+        type="button"
+        aria-label={"移除 " + image.name}
+        className="absolute right-0.5 top-0.5 flex size-7 items-center justify-center rounded bg-black/70 text-white opacity-90 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+        onClick={(event) => { event.stopPropagation(); onRemove(); }}
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
 function ChatBubble({
   message,
   html,
   ...actions
 }: { message: ConversationMessage; html: string } & BubbleActions) {
+  const content = splitMessageContent(message.content);
   const body = message.role === "user" ? (
     <MessageContent className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-secondary px-3.5 py-2 text-sm">
-      {message.content}
+      {content.imageUrls.length > 0 ? <MessageImages urls={content.imageUrls} /> : null}
+      {content.text ? <p>{content.text}</p> : null}
     </MessageContent>
   ) : (
     <MessageContent className="w-full text-sm">
       {message.reasoning ? <ReasoningBlock text={message.reasoning} /> : null}
       {message.tools?.map((tool) => <ToolChip key={tool.id} name={tool.name} status={tool.status} />)}
-      <AssistantBody content={message.content} html={html} />
+      {content.imageUrls.length > 0 ? <MessageImages urls={content.imageUrls} /> : null}
+      {content.text ? <AssistantBody content={content.text} html={html} /> : null}
     </MessageContent>
   );
 
@@ -411,6 +763,35 @@ function ChatBubble({
     >
       <Message align={message.role === "user" ? "end" : "start"}>{body}</Message>
       <MessageActions {...actions} align={message.role === "user" ? "end" : "start"} />
+    </div>
+  );
+}
+
+function MessageImages({ urls }: { urls: string[] }) {
+  return (
+    <div className={cn("grid w-64 max-w-full gap-1.5", urls.length > 1 ? "grid-cols-2" : "grid-cols-1")}>
+      {urls.map((url, index) => (
+        <a
+          key={"image-" + index}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={"查看第 " + (index + 1) + " 张图片"}
+          className={cn(
+            "block overflow-hidden rounded-md border bg-card",
+            urls.length > 1 ? "aspect-square" : "max-h-80",
+          )}
+        >
+          <img
+            src={url}
+            alt={"对话图片 " + (index + 1)}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className={cn("w-full object-contain", urls.length > 1 ? "size-full" : "max-h-80")}
+          />
+        </a>
+      ))}
     </div>
   );
 }

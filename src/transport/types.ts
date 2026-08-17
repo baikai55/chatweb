@@ -7,10 +7,57 @@
 
 export type ChatRole = "system" | "user" | "assistant";
 
+/**
+ * OpenAI 兼容 chat/completions 的文本内容片段。
+ *
+ * 绝大多数旧后端只接受 `content: string`，支持视觉输入的后端则接受
+ * `content: [{ type: "text", text: "..." }, { type: "image_url", ... }]`。
+ * 两种形状都保留在统一协议类型里，适配器会原样透传，因而不会破坏旧会话。
+ */
+export type ChatTextContentPart = {
+  type: "text";
+  text: string;
+};
+
+/** OpenAI vision 兼容的图片内容片段。url 可以是 https 或 data:image/* URL。 */
+export type ChatImageContentPart = {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+};
+
+export type ChatContentPart = ChatTextContentPart | ChatImageContentPart;
+export type ChatMessageContent = string | ChatContentPart[];
+
 export type ChatMessage = {
   role: ChatRole;
-  content: string;
+  content: ChatMessageContent;
 };
+
+/**
+ * 从字符串或多模态内容中取出可显示的文本。
+ *
+ * 上游的非流式响应偶尔也会把 `message.content` 包成 text part 数组；
+ * 统一在这里解包，避免这种响应被误判成空回复。图片片段本身没有可显示
+ * 的文字，会被自然忽略。
+ */
+export function readChatContentText(value: unknown): string {
+  if (typeof value === "string") return value;
+
+  if (Array.isArray(value)) {
+    return value.map((part) => readChatContentText(part)).join("");
+  }
+
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+
+  if (typeof record.text === "string") return record.text;
+  if (typeof record.output_text === "string") return record.output_text;
+  if ("content" in record) return readChatContentText(record.content);
+  return "";
+}
 
 export type ReasoningEffort = "auto" | "none" | "low" | "medium" | "high" | "xhigh";
 

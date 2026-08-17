@@ -1,5 +1,10 @@
 import { STORE_SESSIONS, idbClear, idbDelete, idbGetByScope, idbPut } from "@/shared/db/idb";
-import type { ChatMessage, ChatToolActivity, ReasoningEffort } from "@/transport/types";
+import {
+  readChatContentText,
+  type ChatMessage,
+  type ChatToolActivity,
+  type ReasoningEffort,
+} from "@/transport/types";
 
 /**
  * 聊天会话存储。
@@ -59,9 +64,15 @@ export function createBlankSession(scope: string, model: string): ChatSession {
 /** 用第一条用户消息做标题。 */
 export function deriveSessionTitle(messages: ConversationMessage[]): string {
   const first = messages.find((message) => message.role === "user");
-  const text = first?.content.trim().replaceAll(/\s+/g, " ") ?? "";
-  if (!text) return "";
-  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+  const text = readChatContentText(first?.content).trim().replaceAll(/\s+/g, " ");
+  if (!text) {
+    const imageCount = Array.isArray(first?.content)
+      ? first.content.filter((part) => part.type === "image_url").length
+      : 0;
+    if (imageCount > 0) return imageCount === 1 ? "图片" : "图片 × " + imageCount;
+    return "";
+  }
+  return text.length > 40 ? text.slice(0, 40) + "…" : text;
 }
 
 /** 按更新时间倒序。空会话（一条消息都没有）不返回，避免历史里全是空壳。 */

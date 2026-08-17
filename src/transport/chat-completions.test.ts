@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { buildRequestBody, webSearchNote } from "@/transport/chat-completions";
+import { buildRequestBody, streamChatCompletions, webSearchNote } from "@/transport/chat-completions";
 import type { ChatCompletionsOptions } from "@/transport/chat-completions";
+import { readChatContentText } from "@/transport/types";
 
 function options(patch: Partial<ChatCompletionsOptions> = {}): ChatCompletionsOptions {
   return {
@@ -56,6 +57,64 @@ describe("buildRequestBody 的联网搜索工具", () => {
   it("Claude 也照发 —— CPA 会静默过滤掉，但换个后端可能就认", () => {
     const body = buildRequestBody(options({ model: "claude-sonnet-4-5", webSearch: true }), "cpa");
     expect(body.tools).toEqual([{ type: "web_search" }]);
+  });
+});
+
+describe("buildRequestBody 的视觉消息", () => {
+  it("保留 OpenAI image_url 内容数组，并兼容旧字符串消息", () => {
+    const image = {
+      type: "image_url" as const,
+      image_url: { url: "data:image/png;base64,AAAA", detail: "high" as const },
+    };
+    const body = buildRequestBody(options({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "这是什么？" }, image] },
+        { role: "assistant", content: "上一条回答" },
+      ],
+    }), "generic");
+
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "这是什么？" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "high" } },
+        ],
+      },
+      { role: "assistant", content: "上一条回答" },
+    ]);
+  });
+
+  it("非流式视觉响应里的 text part 可以正常取回", () => {
+    expect(readChatContentText([
+      { type: "text", text: "先说结论：" },
+      { type: "image_url", image_url: { url: "https://example.com/reference.png" } },
+      { type: "text", text: "这是一只猫。" },
+    ])).toBe("先说结论：这是一只猫。");
+  });
+
+  it("后端不走流式时也能读取 text part 数组", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: [{ type: "text", text: "我看到了图片。" }] } }],
+    }), { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await streamChatCompletions(options({
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "描述这张图" }, {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,AAAA" },
+          }],
+        }],
+      }));
+      expect(result.text).toBe("我看到了图片。");
+      const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      expect(JSON.parse(String(request?.body)).messages[0].content).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
