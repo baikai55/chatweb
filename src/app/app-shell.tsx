@@ -245,14 +245,14 @@ function SessionList({
               >
                 {session.title || "未命名对话"}
               </button>
-              <button
-                type="button"
-                aria-label="删除对话"
-                onClick={() => onDelete(session.id)}
-                className="shrink-0 rounded p-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100"
-              >
-                <Trash2 className="size-3" />
-              </button>
+              <ConfirmButton
+                label={<Trash2 className="size-3" />}
+                confirmLabel="确定删除"
+                ariaLabel="删除对话"
+                confirmAriaLabel="确定删除对话"
+                onConfirm={() => onDelete(session.id)}
+                className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
+              />
             </div>
           ))
         )}

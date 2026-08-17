@@ -1,7 +1,8 @@
-import { Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { createPortal } from "react-dom";
 
 import { useSidebarSlot } from "@/app/sidebar-slot";
+import { Button } from "@/components/ui/button";
 import { ConfirmButton } from "@/components/ui/confirm-button";
 import type { GenerationRecord } from "@/features/history/generation-store";
 import { cn } from "@/shared/lib/cn";
@@ -22,6 +23,9 @@ export function GenerationHistory({
   onOpen,
   onDelete,
   onClear,
+  onNew,
+  newLabel,
+  newDisabled = false,
   emptyHint,
 }: {
   records: GenerationRecord[];
@@ -29,12 +33,28 @@ export function GenerationHistory({
   onOpen: (record: GenerationRecord) => void;
   onDelete: (id: string) => void;
   onClear: () => void;
+  onNew: () => void;
+  newLabel: string;
+  newDisabled?: boolean;
   emptyHint: string;
 }) {
   const slot = useSidebarSlot();
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div className="px-2 pb-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 w-full justify-start gap-2 px-2 text-xs font-normal"
+          disabled={newDisabled}
+          onClick={() => { onNew(); slot.onNavigate(); }}
+        >
+          <Plus className="size-3.5" />{newLabel}
+        </Button>
+      </div>
+
       <div className="flex items-center gap-1 px-4 pb-1">
         <span className="text-xs text-muted-foreground">
           历史{records.length > 0 ? ` (${records.length})` : ""}
@@ -67,14 +87,14 @@ export function GenerationHistory({
                   {new Date(item.createdAt).toLocaleString()} · {item.model}
                 </span>
               </button>
-              <button
-                type="button"
-                aria-label="删除这条记录"
-                onClick={() => onDelete(item.id)}
-                className="shrink-0 rounded p-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100"
-              >
-                <Trash2 className="size-3" />
-              </button>
+              <ConfirmButton
+                label={<Trash2 className="size-3" />}
+                confirmLabel="确定删除"
+                ariaLabel="删除这条记录"
+                confirmAriaLabel="确定删除这条记录"
+                onConfirm={() => onDelete(item.id)}
+                className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
+              />
             </div>
           ))
         )}

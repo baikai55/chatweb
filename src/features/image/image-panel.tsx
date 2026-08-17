@@ -103,6 +103,23 @@ export function ImagePanel({
     setPrompt(record.title);
   }
 
+  function startNew(): void {
+    if (pending) return;
+    releaseRef.current?.();
+    releaseRef.current = null;
+    setSelectedModel(imageModels[0]?.id ?? "");
+    setPrompt("");
+    setCount("1");
+    setDimensionMode("size");
+    setSize("1024x1024");
+    setAspectRatio("1:1");
+    setQuality("default");
+    setResponseFormat("url");
+    setImages([]);
+    setError("");
+    setActiveRecordId(null);
+  }
+
   const model = imageModels.some((item) => item.id === selectedModel)
     ? selectedModel
     : imageModels[0]?.id ?? "";
@@ -206,6 +223,9 @@ export function ImagePanel({
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
+        onNew={startNew}
+        newLabel="新图片"
+        newDisabled={pending}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/shared/lib/cn";
@@ -18,12 +18,16 @@ export function ConfirmButton({
   confirmLabel,
   onConfirm,
   className,
+  ariaLabel,
+  confirmAriaLabel,
   resetAfterMs = 4000,
 }: {
-  label: string;
-  confirmLabel: string;
+  label: ReactNode;
+  confirmLabel: ReactNode;
   onConfirm: () => void;
   className?: string;
+  ariaLabel?: string;
+  confirmAriaLabel?: string;
   resetAfterMs?: number;
 }) {
   const [armed, setArmed] = useState(false);
@@ -42,6 +46,8 @@ export function ConfirmButton({
       type="button"
       variant="ghost"
       size="sm"
+      aria-label={armed ? confirmAriaLabel ?? ariaLabel : ariaLabel}
+      data-armed={armed}
       className={cn("h-7 px-2 text-xs font-normal", armed && "text-destructive", className)}
       onClick={() => {
         if (armed) {

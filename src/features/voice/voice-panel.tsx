@@ -355,6 +355,25 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
+  function startNew() {
+    if (busy) return;
+    setTTSModel(ttsModels[0]?.id ?? "");
+    setSTTModel(sttModels[0]?.id ?? "");
+    setText("");
+    setLanguage("zh");
+    setSpeed("1");
+    setOutputFormat("auto");
+    setWithTimestamps(false);
+    setVoiceId(voices[0]?.voiceId ?? "eve");
+    setSTTLanguage("auto");
+    clearFile();
+    replaceAudioResult(null);
+    setSTTResult(null);
+    setStatus("");
+    setError("");
+    setActiveRecordId(null);
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center border-b px-3 py-2">
@@ -368,25 +387,19 @@ export function VoicePanel({ backend, models, onManage }: VoicePanelProps) {
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        {/*
-          方言不对不再拦人，但该提醒还是提醒一句 —— 实测 CPA 那台的
-          /tts /stt 全是 404，直接点下去会拿到一条不知所云的报错。
-          这是提示，不是门。
-        */}
-        {backend.flavor === "grok2api" ? (
-          !knownCapabilities ? (
-            <span className="ml-auto text-xs text-muted-foreground">没勾过面板，两个都放出来了</span>
-          ) : null
-        ) : (
+        {!knownCapabilities ? (
           <span className="ml-auto text-right text-xs leading-4 text-muted-foreground">
-            这个后端认出来是 {backend.flavor}，语音端点未必存在（实测 CPA 是 404）
+            设置中未指定面板能力，当前全部展示，是否可用以上游实际响应为准
           </span>
-        )}
+        ) : null}
       </div>
 
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
+        onNew={startNew}
+        newLabel="新语音"
+        newDisabled={busy}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);

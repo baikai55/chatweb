@@ -167,6 +167,28 @@ export function VideoPanel({
     setSourcePreview("");
   }
 
+  function startNew() {
+    if (busy) return;
+    releaseRef.current?.();
+    releaseRef.current = null;
+    // 即使某个上游没有及时响应 abort，也不允许旧任务再更新新页面。
+    runSequenceRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSelectedModel(videoModels[0]?.id ?? "");
+    setOperation("generate");
+    setPrompt("");
+    setDuration("6");
+    setAspectRatio("16:9");
+    setResolution("720p");
+    setExtendDuration("default");
+    clearSource();
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setFormError("");
+    setRun({ phase: "idle" });
+    setActiveRecordId(null);
+  }
+
   function cancel() {
     const controller = abortRef.current;
     if (!controller) return;
@@ -278,6 +300,7 @@ export function VideoPanel({
 
   /** 任务落地后的收尾：通知 + 存历史。同步返回和轮询结束两条路都走这里。 */
   function finish(status: VideoGenerationStatus, text: string, sequence: number): void {
+    if (runSequenceRef.current !== sequence) return;
     if (status.status !== "done") return;
     notifyTaskDone("视频生成完成", `${operationLabel(operation)} · ${model}`);
     if (!status.video?.url) return;
@@ -287,7 +310,7 @@ export function VideoPanel({
       assets: [{ url: status.video.url }],
       params: { operation, duration, aspectRatio, resolution, extendDuration },
     });
-    if (runSequenceRef.current === sequence) setActiveRecordId(saved.id);
+    setActiveRecordId(saved.id);
   }
 
   return (
@@ -316,6 +339,9 @@ export function VideoPanel({
       <GenerationHistory
         records={history.records}
         activeId={activeRecordId}
+        onNew={startNew}
+        newLabel="新视频"
+        newDisabled={busy}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);
