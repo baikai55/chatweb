@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { validateSTTAudioFile } from "@/features/voice/audio-file";
+import { ensureSTTWebMDuration, validateSTTAudioFile } from "@/features/voice/audio-file";
 import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { GenerationHistory } from "@/features/history/generation-history";
@@ -306,7 +306,7 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
 
   function handleRecordedAudio(recording: RecordedAudio) {
     setError("");
-    void selectAudioFile(recording.file);
+    void selectAudioFile(recording.file, recording.durationMs);
   }
 
   function handleRecorderError(recorderError: AudioRecorderError) {
@@ -482,12 +482,15 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
     }
   }
 
-  async function selectAudioFile(file: File) {
+  async function selectAudioFile(file: File, recordingDurationMs?: number) {
     const selection = fileSelectionRef.current + 1;
     fileSelectionRef.current = selection;
     setStatus("正在检查音频文件…");
     setError("");
-    const validationError = await validateSTTAudioFile(file);
+    const uploadFile = recordingDurationMs === undefined
+      ? file
+      : await ensureSTTWebMDuration(file, recordingDurationMs);
+    const validationError = await validateSTTAudioFile(uploadFile);
     if (fileSelectionRef.current !== selection) return;
     if (validationError) {
       setStatus("");
@@ -496,7 +499,7 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
       return;
     }
     setStatus("");
-    setAudioFile(file);
+    setAudioFile(uploadFile);
   }
 
   function clearFile() {

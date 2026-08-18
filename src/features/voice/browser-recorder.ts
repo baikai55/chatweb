@@ -118,6 +118,7 @@ export class BrowserAudioRecorder {
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private startedAt = 0;
+  private stoppedDurationMs: number | null = null;
   private session = 0;
   private discard = false;
   private disposed = false;
@@ -163,6 +164,7 @@ export class BrowserAudioRecorder {
     this.session = session;
     this.discard = false;
     this.chunks = [];
+    this.stoppedDurationMs = null;
     this.publish({ phase: "requesting", elapsedMs: 0, error: null });
 
     try {
@@ -225,10 +227,11 @@ export class BrowserAudioRecorder {
     }
     if (this.snapshot.phase !== "recording" || !this.recorder) return;
     this.discard = false;
+    this.stoppedDurationMs = Math.max(0, this.now() - this.startedAt);
     this.publish({
       ...this.snapshot,
       phase: "stopping",
-      elapsedMs: Math.max(0, this.now() - this.startedAt),
+      elapsedMs: this.stoppedDurationMs,
     });
     this.stopRecorder(this.recorder);
   }
@@ -295,7 +298,7 @@ export class BrowserAudioRecorder {
 
   private finalize(recorder: MediaRecorder): void {
     if (this.recorder !== recorder) return;
-    const durationMs = Math.max(0, this.now() - this.startedAt);
+    const durationMs = this.stoppedDurationMs ?? Math.max(0, this.now() - this.startedAt);
     const chunks = this.chunks;
     const discarded = this.discard;
     const existingError = this.snapshot.error;
@@ -346,6 +349,7 @@ export class BrowserAudioRecorder {
     this.releaseStream();
     this.chunks = [];
     this.startedAt = 0;
+    this.stoppedDurationMs = null;
   }
 
   private releaseStream(): void {

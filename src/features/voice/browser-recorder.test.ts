@@ -202,6 +202,7 @@ describe("BrowserAudioRecorder", () => {
 
     recorder.stop();
     expect(recorder.getSnapshot().phase).toBe("stopping");
+    now = 2_800;
     vi.advanceTimersByTime(2_000);
 
     expect(onRecorded).toHaveBeenCalledWith(expect.objectContaining({ durationMs: 800 }));
