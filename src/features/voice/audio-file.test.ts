@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   MAX_STT_AUDIO_BYTES,
   ensureSTTWebMDuration,
+  prepareRecordedSTTAudioFile,
   validateSTTAudioFile,
   validateSTTAudioMetadata,
 } from "@/features/voice/audio-file";
@@ -80,6 +81,15 @@ describe("ensureSTTWebMDuration", () => {
     expect(parseWebM(await fileBytes(fixed)).duration).toBe(2_500);
   });
 
+  it("覆盖 MediaRecorder 写出的零值 Duration，不重复追加元素", async () => {
+    const source = webmFile({ durationTicks: 0 });
+    const fixed = await ensureSTTWebMDuration(source, 1_250);
+
+    expect(fixed).not.toBe(source);
+    expect(fixed.size).toBe(source.size);
+    expect(parseWebM(await fileBytes(fixed)).duration).toBe(1_250);
+  });
+
   it("Info 和 Segment 增长越过单字节 VINT 后会同步扩容 size", async () => {
     const source = webmFile({ paddingBytes: 107 });
     const before = parseWebM(await fileBytes(source));
@@ -110,7 +120,7 @@ describe("ensureSTTWebMDuration", () => {
     expect(after.duration).toBe(750);
   });
 
-  it("已有 Duration、非 WebM、无效参数和损坏 EBML 均返回原文件", async () => {
+  it("已有有效 Duration、非 WebM、无效参数和损坏 EBML 均返回原文件", async () => {
     const withDuration = webmFile({ durationTicks: 321 });
     const matroska = webmFile({ docType: "matroska" });
     const indexed = webmFile({ indexed: true });
@@ -127,6 +137,70 @@ describe("ensureSTTWebMDuration", () => {
     await expect(ensureSTTWebMDuration(mp3, 1_000)).resolves.toBe(mp3);
     await expect(ensureSTTWebMDuration(invalidDuration, Number.NaN)).resolves.toBe(invalidDuration);
     await expect(ensureSTTWebMDuration(malformed, 1_000)).resolves.toBe(malformed);
+  });
+});
+
+describe("prepareRecordedSTTAudioFile", () => {
+  it("把浏览器 WebM 录音转成标准单声道 PCM WAV", async () => {
+    const source = webmFile({ durationTicks: 0 });
+    const decodeAudio = vi.fn(async () => ({
+      numberOfChannels: 2,
+      length: 2,
+      sampleRate: 48_000,
+      getChannelData: (channel: number) => channel === 0
+        ? new Float32Array([-1, 0.5])
+        : new Float32Array([1, 0.5]),
+    }));
+
+    const prepared = await prepareRecordedSTTAudioFile(source, 1_250, { decodeAudio });
+    const bytes = await fileBytes(prepared);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    expect(decodeAudio).toHaveBeenCalledOnce();
+    expect(prepared.name).toBe("recording.wav");
+    expect(prepared.type).toBe("audio/wav");
+    expect(ascii(bytes.slice(0, 4))).toBe("RIFF");
+    expect(ascii(bytes.slice(8, 12))).toBe("WAVE");
+    expect(view.getUint16(20, true)).toBe(1);
+    expect(view.getUint16(22, true)).toBe(1);
+    expect(view.getUint32(24, true)).toBe(48_000);
+    expect(view.getUint16(34, true)).toBe(16);
+    expect(view.getInt16(44, true)).toBe(0);
+    expect(view.getInt16(46, true)).toBe(16_383);
+  });
+
+  it("设备无法解码 WebM 时退回 Duration 修复，非 WebM 不启动解码", async () => {
+    const decodeAudio = vi.fn(async () => { throw new Error("unsupported codec"); });
+    const webm = webmFile({ durationTicks: 0 });
+    const fixedWebM = await prepareRecordedSTTAudioFile(webm, 900, { decodeAudio });
+    expect(fixedWebM.type).toBe(webm.type);
+    expect(parseWebM(await fileBytes(fixedWebM)).duration).toBe(900);
+
+    const mp3 = audio([0x49, 0x44, 0x33, 0x04]);
+    await expect(prepareRecordedSTTAudioFile(mp3, 900, { decodeAudio })).resolves.toBe(mp3);
+    expect(decodeAudio).toHaveBeenCalledOnce();
+  });
+
+  it("准备过程支持取消，并跳过过长录音的移动端 WAV 转码", async () => {
+    const source = webmFile({ durationTicks: 0 });
+    const controller = new AbortController();
+    controller.abort();
+    const decodeAudio = vi.fn(async () => ({
+      numberOfChannels: 1,
+      length: 1,
+      sampleRate: 48_000,
+      getChannelData: () => new Float32Array([0]),
+    }));
+
+    await expect(prepareRecordedSTTAudioFile(source, 1_000, {
+      decodeAudio,
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(decodeAudio).not.toHaveBeenCalled();
+
+    const fixedLongRecording = await prepareRecordedSTTAudioFile(source, 120_001, { decodeAudio });
+    expect(parseWebM(await fileBytes(fixedLongRecording)).duration).toBe(120_001);
+    expect(decodeAudio).not.toHaveBeenCalled();
   });
 });
 
@@ -283,4 +357,8 @@ function vintWidth(first: number): number {
     width += 1;
   }
   return width;
+}
+
+function ascii(bytes: Uint8Array): string {
+  return String.fromCharCode(...bytes);
 }

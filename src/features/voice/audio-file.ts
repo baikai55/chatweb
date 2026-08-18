@@ -1,3 +1,5 @@
+import fixWebmDuration from "fix-webm-duration";
+
 /**
  * 语音转写的浏览器侧安全边界。
  *
@@ -27,6 +29,7 @@ const DURATION_ID = 0x4489;
 const TIMECODE_SCALE_ID = 0x2ad7b1;
 const DOC_TYPE_ID = 0x4282;
 const DEFAULT_TIMECODE_SCALE_NS = 1_000_000;
+const MAX_WAV_TRANSCODE_DURATION_MS = 2 * 60 * 1_000;
 const SEEK_HEAD_ID = 0x114d9b74;
 const CUES_ID = 0x1c53bb6b;
 const CLUSTER_ID = 0x1f43b675;
@@ -109,6 +112,119 @@ export async function validateSTTAudioFile(file: File): Promise<string> {
   return "";
 }
 
+type DecodedRecordedAudio = Pick<
+  AudioBuffer,
+  "getChannelData" | "length" | "numberOfChannels" | "sampleRate"
+>;
+
+export type RecordedAudioPreparationEnvironment = {
+  decodeAudio?: (data: ArrayBuffer) => Promise<DecodedRecordedAudio>;
+  signal?: AbortSignal;
+};
+
+/**
+ * 浏览器通常把麦克风录成 WebM，而部分 STT 上游无法可靠读取它的时长。
+ * 优先在本地转成结构固定的单声道 PCM WAV；设备不支持解码时再退回 WebM 元数据修复。
+ */
+export async function prepareRecordedSTTAudioFile(
+  file: File,
+  durationMs: number,
+  environment: RecordedAudioPreparationEnvironment = {},
+): Promise<File> {
+  if (file.size <= 0 || file.size > MAX_STT_AUDIO_BYTES) return file;
+  if (durationMs > MAX_WAV_TRANSCODE_DURATION_MS) return ensureSTTWebMDuration(file, durationMs);
+
+  try {
+    throwIfPreparationAborted(environment.signal);
+    const header = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (detectAudioContainer(header) !== "webm") return file;
+    const data = await file.arrayBuffer();
+    throwIfPreparationAborted(environment.signal);
+    const decoded = await (environment.decodeAudio ?? decodeBrowserAudio)(data);
+    throwIfPreparationAborted(environment.signal);
+    const wav = encodeMonoPCM16Wav(decoded, environment.signal);
+    if (wav) {
+      const stem = file.name.replace(/\.[^.]+$/u, "") || "recording";
+      return new File([wav], `${stem}.wav`, {
+        type: "audio/wav",
+        lastModified: file.lastModified,
+      });
+    }
+  } catch (caught) {
+    if (isPreparationAbort(caught)) throw caught;
+    // 某些浏览器不能用 AudioContext 解码自身录制的 Opus，继续走 WebM 修复兜底。
+  }
+
+  return ensureSTTWebMDuration(file, durationMs);
+}
+
+async function decodeBrowserAudio(data: ArrayBuffer): Promise<AudioBuffer> {
+  const AudioContextConstructor = globalThis.AudioContext
+    ?? (globalThis as typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextConstructor) throw new Error("AudioContext is unavailable");
+  const context = new AudioContextConstructor();
+  try {
+    return await context.decodeAudioData(data);
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
+function encodeMonoPCM16Wav(audio: DecodedRecordedAudio, signal?: AbortSignal): ArrayBuffer | null {
+  const { length, numberOfChannels, sampleRate } = audio;
+  if (!Number.isInteger(length) || length <= 0 || !Number.isInteger(numberOfChannels)
+    || numberOfChannels <= 0 || !Number.isFinite(sampleRate) || sampleRate <= 0) return null;
+  const dataBytes = length * 2;
+  if (!Number.isSafeInteger(dataBytes) || 44 + dataBytes > MAX_STT_AUDIO_BYTES) return null;
+
+  const channels: Float32Array[] = [];
+  for (let channel = 0; channel < numberOfChannels; channel += 1) {
+    const samples = audio.getChannelData(channel);
+    if (samples.length < length) return null;
+    channels.push(samples);
+  }
+
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  writeASCII(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeASCII(view, 8, "WAVE");
+  writeASCII(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, Math.round(sampleRate), true);
+  view.setUint32(28, Math.round(sampleRate) * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeASCII(view, 36, "data");
+  view.setUint32(40, dataBytes, true);
+
+  for (let frame = 0; frame < length; frame += 1) {
+    if ((frame & 0x0fff) === 0) throwIfPreparationAborted(signal);
+    let mixed = 0;
+    for (const channel of channels) mixed += channel[frame] ?? 0;
+    const sample = Math.max(-1, Math.min(1, mixed / numberOfChannels));
+    view.setInt16(44 + frame * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+  return buffer;
+}
+
+function throwIfPreparationAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+}
+
+function isPreparationAbort(cause: unknown): boolean {
+  return cause instanceof DOMException && cause.name === "AbortError";
+}
+
+function writeASCII(view: DataView, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
 /**
  * 为浏览器录出的 WebM 补上 Info/Duration。
  *
@@ -122,17 +238,32 @@ export async function ensureSTTWebMDuration(file: File, durationMs: number): Pro
   try {
     const header = new Uint8Array(await file.slice(0, 4).arrayBuffer());
     if (detectAudioContainer(header) !== "webm") return file;
+    const fixedBlob = await fixWebmDuration(file, durationMs, { logger: false });
+    if (fixedBlob !== file) {
+      return new File([fixedBlob], file.name, {
+        type: file.type,
+        lastModified: file.lastModified,
+      });
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
     const parsed = locateWebMInfo(bytes);
     if (!parsed) return file;
 
-    const duration = new Uint8Array(11);
-    duration.set([0x44, 0x89, 0x88]);
     const durationTicks = durationMs * 1_000_000 / parsed.timecodeScaleNs;
     if (!Number.isFinite(durationTicks) || durationTicks <= 0) return file;
-    new DataView(duration.buffer).setFloat64(3, durationTicks, false);
+    const duration = createDurationElement(
+      durationTicks,
+      parsed.duration ? parsed.duration.end - parsed.duration.bodyStart : undefined,
+    );
 
-    const nextInfoBody = concatBytes(bytes.slice(parsed.info.bodyStart, parsed.info.end), duration);
+    const nextInfoBody = parsed.duration
+      ? concatBytes(
+        bytes.slice(parsed.info.bodyStart, parsed.duration.idStart),
+        duration,
+        bytes.slice(parsed.duration.end, parsed.info.end),
+      )
+      : concatBytes(bytes.slice(parsed.info.bodyStart, parsed.info.end), duration);
     const nextInfo = concatBytes(
       bytes.slice(parsed.info.idStart, parsed.info.sizeStart),
       encodeEbmlSize(nextInfoBody.length, parsed.info.sizeWidth),
@@ -165,6 +296,16 @@ export async function ensureSTTWebMDuration(file: File, durationMs: number): Pro
   }
 }
 
+function createDurationElement(durationTicks: number, existingPayloadWidth?: number): Uint8Array {
+  const payloadWidth = existingPayloadWidth === 4 ? 4 : 8;
+  const element = new Uint8Array(3 + payloadWidth);
+  element.set([0x44, 0x89, 0x80 | payloadWidth]);
+  const view = new DataView(element.buffer);
+  if (payloadWidth === 4) view.setFloat32(3, durationTicks, false);
+  else view.setFloat64(3, durationTicks, false);
+  return element;
+}
+
 type EbmlElement = {
   id: number;
   idStart: number;
@@ -179,6 +320,7 @@ type WebMInfoLocation = {
   segment: EbmlElement;
   info: EbmlElement;
   timecodeScaleNs: number;
+  duration: EbmlElement | null;
 };
 
 function locateWebMInfo(bytes: Uint8Array): WebMInfoLocation | null {
@@ -224,8 +366,13 @@ function locateWebMInfo(bytes: Uint8Array): WebMInfoLocation | null {
   }
   if (!info) return null;
   const infoMetadata = readInfoMetadata(bytes, info);
-  if (!infoMetadata || infoMetadata.hasDuration) return null;
-  return { segment, info, timecodeScaleNs: infoMetadata.timecodeScaleNs };
+  if (!infoMetadata || (infoMetadata.durationValue !== null && infoMetadata.durationValue > 0)) return null;
+  return {
+    segment,
+    info,
+    timecodeScaleNs: infoMetadata.timecodeScaleNs,
+    duration: infoMetadata.duration,
+  };
 }
 
 function readDocType(bytes: Uint8Array, ebml: EbmlElement): string | null | undefined {
@@ -247,13 +394,20 @@ function readDocType(bytes: Uint8Array, ebml: EbmlElement): string | null | unde
 function readInfoMetadata(
   bytes: Uint8Array,
   info: EbmlElement,
-): { hasDuration: boolean; timecodeScaleNs: number } | null {
+): { duration: EbmlElement | null; durationValue: number | null; timecodeScaleNs: number } | null {
   let timecodeScaleNs = DEFAULT_TIMECODE_SCALE_NS;
+  let duration: EbmlElement | null = null;
+  let durationValue: number | null = null;
   let cursor = info.bodyStart;
   while (cursor < info.end) {
     const element = readEbmlElement(bytes, cursor, info.end);
     if (!element) return null;
-    if (element.id === DURATION_ID) return { hasDuration: true, timecodeScaleNs };
+    if (element.id === DURATION_ID) {
+      if (duration || element.unknownSize) return null;
+      duration = element;
+      durationValue = readEbmlFloat(bytes, element.bodyStart, element.end);
+      if (durationValue === null) return null;
+    }
     if (element.id === TIMECODE_SCALE_ID) {
       const value = readEbmlUnsigned(bytes, element.bodyStart, element.end);
       if (value === null || value <= 0) return null;
@@ -262,7 +416,15 @@ function readInfoMetadata(
     if (element.unknownSize) return null;
     cursor = element.end;
   }
-  return { hasDuration: false, timecodeScaleNs };
+  return { duration, durationValue, timecodeScaleNs };
+}
+
+function readEbmlFloat(bytes: Uint8Array, start: number, end: number): number | null {
+  const width = end - start;
+  if (width !== 4 && width !== 8) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset + start, width);
+  const value = width === 4 ? view.getFloat32(0, false) : view.getFloat64(0, false);
+  return Number.isFinite(value) ? value : null;
 }
 
 function readEbmlUnsigned(bytes: Uint8Array, start: number, end: number): number | null {

@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { ensureSTTWebMDuration, validateSTTAudioFile } from "@/features/voice/audio-file";
+import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/voice/audio-file";
 import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { GenerationHistory } from "@/features/history/generation-history";
@@ -137,6 +137,7 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
   const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const fileSelectionRef = useRef(0);
+  const filePreparationRef = useRef<AbortController | null>(null);
   const requestRef = useRef<AbortController | null>(null);
   const voiceListRequestRef = useRef<AbortController | null>(null);
   const audioResultRef = useRef<SpeechAudioResult | null>(null);
@@ -276,6 +277,7 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
   useEffect(() => () => {
     requestRef.current?.abort();
     voiceListRequestRef.current?.abort();
+    filePreparationRef.current?.abort();
     releaseSpeechAudio(audioResultRef.current);
   }, []);
 
@@ -485,25 +487,39 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
   async function selectAudioFile(file: File, recordingDurationMs?: number) {
     const selection = fileSelectionRef.current + 1;
     fileSelectionRef.current = selection;
+    filePreparationRef.current?.abort();
+    const controller = new AbortController();
+    filePreparationRef.current = controller;
     setStatus("正在检查音频文件…");
     setError("");
-    const uploadFile = recordingDurationMs === undefined
-      ? file
-      : await ensureSTTWebMDuration(file, recordingDurationMs);
-    const validationError = await validateSTTAudioFile(uploadFile);
-    if (fileSelectionRef.current !== selection) return;
-    if (validationError) {
+    try {
+      const uploadFile = recordingDurationMs === undefined
+        ? file
+        : await prepareRecordedSTTAudioFile(file, recordingDurationMs, { signal: controller.signal });
+      const validationError = await validateSTTAudioFile(uploadFile);
+      if (fileSelectionRef.current !== selection) return;
+      if (validationError) {
+        setStatus("");
+        setError(validationError);
+        clearFile();
+        return;
+      }
       setStatus("");
-      setError(validationError);
-      clearFile();
-      return;
+      setAudioFile(uploadFile);
+    } catch (caught) {
+      if (fileSelectionRef.current === selection && !isAbortError(caught)) {
+        setStatus("");
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      if (filePreparationRef.current === controller) filePreparationRef.current = null;
     }
-    setStatus("");
-    setAudioFile(uploadFile);
   }
 
   function clearFile() {
     fileSelectionRef.current += 1;
+    filePreparationRef.current?.abort();
+    filePreparationRef.current = null;
     setAudioFile(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }

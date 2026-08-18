@@ -26,7 +26,7 @@ import { createMessageId, type ChatSession, type ConversationMessage } from "@/f
 import { appendTranscriptionToDraft } from "@/features/console/chat-voice-input";
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
-import { ensureSTTWebMDuration, validateSTTAudioFile } from "@/features/voice/audio-file";
+import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/voice/audio-file";
 import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
@@ -337,13 +337,15 @@ export function ChatPanel({
         throw new Error(sttConnection.reason || "语音转写配置不可用，请在设置的“语音”页重新选择");
       }
       if (!selectedModel) throw new Error("请先在设置的“语音”页选择语音转写模型");
-      const audioFile = await ensureSTTWebMDuration(recording.file, recording.durationMs);
+      controller = new AbortController();
+      sttAbortRef.current = controller;
+      const audioFile = await prepareRecordedSTTAudioFile(recording.file, recording.durationMs, {
+        signal: controller.signal,
+      });
       const validationError = await validateSTTAudioFile(audioFile);
       if (!isCurrent()) return;
       if (validationError) throw new Error(validationError);
 
-      controller = new AbortController();
-      sttAbortRef.current = controller;
       setVoiceStatus("正在将录音转成文字…");
       const result = await transcribeSpeech({
         baseURL: sttConnection.baseURL,
