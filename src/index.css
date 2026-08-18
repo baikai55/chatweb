@@ -116,6 +116,21 @@
   }
 }
 
+/* PWA standalone 模式下 viewport-fit=cover 会把内容延伸到刘海和手势条下方。 */
+@layer utilities {
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .safe-area-bottom-3 {
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
 html,
 body,
 #root {

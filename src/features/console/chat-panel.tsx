@@ -625,7 +625,7 @@ export function ChatPanel({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className="shrink-0 px-3 pb-3"
+        className="shrink-0 px-3 safe-area-bottom-3"
       >
         <div
           className={cn(

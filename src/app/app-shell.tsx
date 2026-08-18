@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SidebarSlotProvider } from "@/app/sidebar-slot";
+import { InstallAppButton } from "@/app/pwa-install";
 import { ConfirmButton } from "@/components/ui/confirm-button";
 import type { Backend, Capability } from "@/backends/types";
 import type { ChatSession } from "@/features/console/chat-store";
@@ -90,7 +91,7 @@ export function AppShell({
 
       <aside
         className={cn(
-          "z-50 flex h-full w-56 shrink-0 flex-col border-r bg-sidebar transition-transform duration-200",
+          "z-50 flex h-full w-56 shrink-0 flex-col border-r bg-sidebar transition-transform duration-200 safe-area-top safe-area-bottom",
           "max-lg:fixed max-lg:inset-y-0 max-lg:left-0",
           drawerOpen ? "max-lg:translate-x-0" : "max-lg:-translate-x-full",
         )}
@@ -167,13 +168,14 @@ export function AppShell({
             >
               <Settings2 className="size-3.5" />设置
             </Button>
+            <InstallAppButton />
             <ThemeToggle />
           </div>
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5 lg:hidden">
+        <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5 safe-area-top lg:hidden">
           <Button variant="ghost" size="icon" className="size-8" onClick={() => setDrawerOpen(true)}>
             <PanelLeft className="size-4" />
           </Button>
