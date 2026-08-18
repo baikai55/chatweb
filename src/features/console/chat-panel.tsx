@@ -30,7 +30,7 @@ import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/vo
 import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { resolveVoiceCallConfig } from "@/features/voice/voice-call-config";
-import { VoiceCallOverlay } from "@/features/voice/voice-call-overlay";
+import { VoiceCallMiniWindow, VoiceCallOverlay } from "@/features/voice/voice-call-overlay";
 import { useVoiceCall } from "@/features/voice/use-voice-call";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
@@ -98,6 +98,7 @@ export function ChatPanel({
   session,
   onCommit,
   onManage,
+  onVoiceCallActiveChange,
 }: {
   backend: Backend;
   /** 包含语音设置可能引用的其它后端。 */
@@ -107,6 +108,7 @@ export function ChatPanel({
   session: ChatSession;
   onCommit: (session: ChatSession) => void;
   onManage: () => void;
+  onVoiceCallActiveChange?: (active: boolean) => void;
 }) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
@@ -119,6 +121,7 @@ export function ChatPanel({
   const [transcribing, setTranscribing] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("");
   const [voiceError, setVoiceError] = useState("");
+  const [voiceCallExpanded, setVoiceCallExpanded] = useState(false);
   /**
    * 哪条消息露出了操作按钮。
    *
@@ -196,6 +199,13 @@ export function ChatPanel({
     onAssistantTurn: sendVoiceCallTurn,
     onAbortAssistant: () => abortRef.current?.abort(),
   });
+
+  useEffect(() => {
+    onVoiceCallActiveChange?.(voiceCall.state.open);
+    if (!voiceCall.state.open) setVoiceCallExpanded(false);
+  }, [onVoiceCallActiveChange, voiceCall.state.open]);
+
+  useEffect(() => () => onVoiceCallActiveChange?.(false), [onVoiceCallActiveChange]);
 
   const addImageFiles = useCallback((incoming: FileList | File[]) => {
     const files = Array.from(incoming);
@@ -284,6 +294,7 @@ export function ChatPanel({
   function handleDragEnter(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (voiceCall.state.open) return;
     dragDepthRef.current += 1;
     setDraggingImages(true);
   }
@@ -291,12 +302,14 @@ export function ChatPanel({
   function handleDragOver(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (voiceCall.state.open) return;
     if (!draggingImages) setDraggingImages(true);
   }
 
   function handleDragLeave(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (voiceCall.state.open) return;
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
     if (dragDepthRef.current === 0) setDraggingImages(false);
   }
@@ -304,6 +317,7 @@ export function ChatPanel({
   function handleDrop(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (voiceCall.state.open) return;
     dragDepthRef.current = 0;
     setDraggingImages(false);
     if (event.dataTransfer.files.length > 0) addImageFiles(event.dataTransfer.files);
@@ -523,20 +537,35 @@ export function ChatPanel({
   }
 
   function startVoiceCall() {
-    if (voiceCall.state.open) return;
+    if (voiceCall.state.open) {
+      setVoiceCallExpanded(true);
+      return;
+    }
     if (streaming || abortRef.current || voiceBusy) {
       toast.error("请等当前录音或回复结束后再开始通话");
       return;
     }
     const result = voiceCall.start();
-    if (result.ok) return;
+    if (result.ok) {
+      setVoiceCallExpanded(true);
+      return;
+    }
     toast.error(result.reason || "语音通话配置不可用");
     onManage();
   }
 
   function endVoiceCall() {
+    setVoiceCallExpanded(false);
     voiceCall.end();
     requestAnimationFrame(() => voiceCallButtonRef.current?.focus());
+  }
+
+  function minimizeVoiceCall() {
+    setVoiceCallExpanded(false);
+  }
+
+  function expandVoiceCall() {
+    setVoiceCallExpanded(true);
   }
 
   function submit(event: FormEvent) {
@@ -629,47 +658,49 @@ export function ChatPanel({
   return (
     /* 点消息以外的任何地方都收起操作按钮 —— 不用另外找"取消"的地方 */
     <div className="flex h-full flex-col" onClick={() => setSelectedId(null)}>
-      <div className="contents" inert={voiceCall.state.open || undefined}>
+      <div className="contents" inert={(voiceCall.state.open && voiceCallExpanded) || undefined}>
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
-        <ModelPicker
-          models={models}
-          value={model}
-          onChange={(id) => onCommit({ ...session, model: id })}
-          onManage={onManage}
-        />
+        <div className="contents" inert={voiceCall.state.open || undefined}>
+          <ModelPicker
+            models={models}
+            value={model}
+            onChange={(id) => onCommit({ ...session, model: id })}
+            onManage={onManage}
+          />
 
-        {/*
-          推理档位和联网搜索都不再按模型能力上锁 —— 判定是拿模型 id 猜的
-          （`isReasoningModel` / `inferVendor` 都只是子串匹配），猜错就把能用的
-          功能锁死了，而且用户根本看不出是"锁了"还是"没这功能"。
-          两个控件的默认值都是不发（`auto` / 关），真发出去一定是用户点过的。
-          上游不认就让它报错，报错至少指得回来。
-        */}
-        <Select
-          value={session.reasoningEffort}
-          onValueChange={(value) => onCommit({ ...session, reasoningEffort: value as ReasoningEffort })}
-        >
-          <SelectTrigger
-            className={cn(
-              "h-8 w-auto gap-1 rounded-full border-0 bg-transparent px-2.5 text-xs shadow-none",
-              !activeModel?.reasoning && "text-muted-foreground",
-            )}
+          {/*
+            推理档位和联网搜索都不再按模型能力上锁 —— 判定是拿模型 id 猜的
+            （`isReasoningModel` / `inferVendor` 都只是子串匹配），猜错就把能用的
+            功能锁死了，而且用户根本看不出是"锁了"还是"没这功能"。
+            两个控件的默认值都是不发（`auto` / 关），真发出去一定是用户点过的。
+            上游不认就让它报错，报错至少指得回来。
+          */}
+          <Select
+            value={session.reasoningEffort}
+            onValueChange={(value) => onCommit({ ...session, reasoningEffort: value as ReasoningEffort })}
           >
-            <BrainCircuit className="size-3.5" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {REASONING_LEVELS.map((level) => (
-              <SelectItem key={level} value={level} className="text-xs">{level}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <SelectTrigger
+              className={cn(
+                "h-8 w-auto gap-1 rounded-full border-0 bg-transparent px-2.5 text-xs shadow-none",
+                !activeModel?.reasoning && "text-muted-foreground",
+              )}
+            >
+              <BrainCircuit className="size-3.5" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {REASONING_LEVELS.map((level) => (
+                <SelectItem key={level} value={level} className="text-xs">{level}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-        <WebSearchToggle
-          enabled={session.webSearch}
-          note={search}
-          onToggle={() => onCommit({ ...session, webSearch: !session.webSearch })}
-        />
+          <WebSearchToggle
+            enabled={session.webSearch}
+            note={search}
+            onToggle={() => onCommit({ ...session, webSearch: !session.webSearch })}
+          />
+        </div>
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -678,14 +709,14 @@ export function ChatPanel({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label="开始语音通话"
+              aria-label={voiceCall.state.open ? "返回语音通话" : "开始语音通话"}
               className="ml-auto size-8 shrink-0 rounded-full text-muted-foreground"
               onClick={startVoiceCall}
             >
               <Phone className="size-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>开始语音通话</TooltipContent>
+          <TooltipContent>{voiceCall.state.open ? "返回语音通话" : "开始语音通话"}</TooltipContent>
         </Tooltip>
       </div>
 
@@ -710,8 +741,8 @@ export function ChatPanel({
                       那一刻的 messages，结束时会用它拼上回复整个覆盖回去，
                       这中间改过的都会被原样冲掉。
                     */
-                    onRegenerate={streaming ? undefined : () => regenerateFrom(message.id)}
-                    onDelete={streaming ? undefined : () => deleteMessage(message.id)}
+                    onRegenerate={streaming || voiceCall.state.open ? undefined : () => regenerateFrom(message.id)}
+                    onDelete={streaming || voiceCall.state.open ? undefined : () => deleteMessage(message.id)}
                   />
                 </MessageScrollerItem>
               ))}
@@ -740,7 +771,9 @@ export function ChatPanel({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className="shrink-0 px-3 safe-area-bottom-3"
+        className={cn("shrink-0 px-3 safe-area-bottom-3", voiceCall.state.open && "opacity-60")}
+        inert={voiceCall.state.open || undefined}
+        aria-disabled={voiceCall.state.open || undefined}
       >
         <div
           className={cn(
@@ -785,7 +818,7 @@ export function ChatPanel({
                       variant="ghost"
                       size="icon"
                       aria-label="切换到文字输入"
-                      disabled={recorderPhase !== "idle"}
+                      disabled={voiceCall.state.open || recorderPhase !== "idle"}
                       className="size-9 shrink-0 rounded-full text-muted-foreground"
                       onClick={leaveVoiceInputMode}
                     >
@@ -809,7 +842,7 @@ export function ChatPanel({
                   <AudioRecorderButton
                     key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
                     wide
-                    disabled={models.length === 0 || streaming !== null}
+                    disabled={voiceCall.state.open || models.length === 0 || streaming !== null}
                     disabledReason={streaming ? "回复完成后才能录音" : undefined}
                     onPhaseChange={handleRecorderPhaseChange}
                     onRecorded={(recording) => { void transcribeRecording(recording); }}
@@ -828,7 +861,7 @@ export function ChatPanel({
                       variant="ghost"
                       size="icon"
                       aria-label="添加图片"
-                      disabled={models.length === 0 || streaming !== null || voiceBusy}
+                      disabled={voiceCall.state.open || models.length === 0 || streaming !== null || voiceBusy}
                       className="size-9 shrink-0 rounded-full text-muted-foreground"
                       onClick={() => fileInputRef.current?.click()}
                     >
@@ -847,7 +880,7 @@ export function ChatPanel({
                           variant="ghost"
                           size="icon"
                           aria-label="切换到语音输入"
-                          disabled={models.length === 0 || streaming !== null || voiceBusy}
+                          disabled={voiceCall.state.open || models.length === 0 || streaming !== null || voiceBusy}
                           className="size-9 shrink-0 rounded-full text-muted-foreground"
                           onClick={enterVoiceInputMode}
                         >
@@ -864,7 +897,7 @@ export function ChatPanel({
                           variant="ghost"
                           size="icon"
                           aria-label="设置语音转写供应商"
-                          disabled={streaming !== null}
+                          disabled={voiceCall.state.open || streaming !== null}
                           className="size-9 shrink-0 rounded-full text-muted-foreground"
                           onClick={onManage}
                         >
@@ -882,7 +915,11 @@ export function ChatPanel({
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={onKeyDown}
                   onPaste={handlePaste}
-                  placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
+                  placeholder={voiceCall.state.open
+                    ? "语音通话中…"
+                    : models.length === 0
+                      ? "先去设置里保存几个模型"
+                      : "说点什么…"}
                   rows={1}
                   disabled={models.length === 0 || voiceCall.state.open}
                   className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -896,7 +933,7 @@ export function ChatPanel({
                     type="submit"
                     size="icon"
                     className="size-9 shrink-0 rounded-full"
-                    disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || voiceBusy || !model}
+                    disabled={voiceCall.state.open || (!input.trim() && pendingImages.length === 0) || readingImages > 0 || voiceBusy || !model}
                     aria-label={readingImages > 0 ? "正在读取图片" : "发送"}
                   >
                     {readingImages > 0 ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
@@ -926,7 +963,7 @@ export function ChatPanel({
       </div>
 
       <VoiceCallOverlay
-        open={voiceCall.state.open}
+        open={voiceCall.state.open && voiceCallExpanded}
         phase={voiceCall.state.phase}
         modelName={activeModel?.displayName || model}
         elapsedMs={voiceCall.state.elapsedMs}
@@ -935,11 +972,23 @@ export function ChatPanel({
         latestUserText={voiceCall.state.latestUserText}
         latestAssistantText={voiceCall.state.latestAssistantText}
         error={voiceCall.state.error}
+        onMinimize={minimizeVoiceCall}
         onToggleMute={voiceCall.toggleMute}
         onToggleSound={voiceCall.toggleSound}
         onInterrupt={voiceCall.interrupt}
         onFinishSpeaking={voiceCall.finishSpeaking}
         onRetry={voiceCall.retry}
+        onEnd={endVoiceCall}
+      />
+
+      <VoiceCallMiniWindow
+        open={voiceCall.state.open && !voiceCallExpanded}
+        phase={voiceCall.state.phase}
+        modelName={activeModel?.displayName || model}
+        elapsedMs={voiceCall.state.elapsedMs}
+        muted={voiceCall.state.muted}
+        error={voiceCall.state.error}
+        onExpand={expandVoiceCall}
         onEnd={endVoiceCall}
       />
     </div>

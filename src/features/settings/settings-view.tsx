@@ -37,7 +37,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { clearAllSessions } from "@/features/console/chat-store";
 import { clearAllGenerations } from "@/features/history/generation-store";
 import { toggleCapabilitySelection } from "@/features/settings/capability-selection";
-import { estimateUsage } from "@/shared/db/idb";
+import { estimateUsage, type StorageUsage } from "@/shared/db/idb";
 import { cn } from "@/shared/lib/cn";
 import {
   IMAGE_TIMEOUT_MAX_SECONDS,
@@ -1607,13 +1607,15 @@ function ImageTimeoutInput() {
 /* ── 本地数据 ─────────────────────────────────────────────────────── */
 
 function DataSection({ onCleared }: { onCleared: () => void }) {
-  const [usage, setUsage] = useState<{ usage: number; quota: number } | null>(null);
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    void estimateUsage().then((result) => { if (!cancelled) setUsage(result); });
+    void estimateUsage()
+      .then((result) => { if (!cancelled) setUsage(result); })
+      .catch(() => { if (!cancelled) setUsage(null); });
     return () => { cancelled = true; };
   }, [busy]);
 
@@ -1624,7 +1626,7 @@ function DataSection({ onCleared }: { onCleared: () => void }) {
       await Promise.all([clearAllSessions(), clearAllGenerations()]);
       onCleared();
       setConfirming(false);
-      toast.success("已删除全部记录");
+      toast.success("已删除全部记录，离线应用缓存和模型列表已保留");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "删除失败");
     } finally {
@@ -1660,10 +1662,30 @@ function DataSection({ onCleared }: { onCleared: () => void }) {
       <p className="mt-1 text-xs text-muted-foreground">
         清掉<strong className="font-medium">全部后端</strong>的对话历史和生图/视频/语音记录，删了拿不回来。
         后端配置、密钥和模型列表不动 —— 那些删了得重新填一遍。
-        {usage ? ` 当前本地占用约 ${formatBytes(usage.usage)}。` : ""}
+        {usage ? <StorageUsageSummary usage={usage} /> : null}
       </p>
     </section>
   );
+}
+
+function StorageUsageSummary({ usage }: { usage: StorageUsage }) {
+  const recordSummary = usage.recordUsage !== undefined
+    ? ` 当前对话和生成记录约 ${formatBytes(usage.recordUsage)}。`
+    : "";
+  if (usage.cacheUsage !== undefined || usage.indexedDBUsage !== undefined) {
+    return (
+      <>
+        {recordSummary}
+        {`本站共占用约 ${formatBytes(usage.usage)}`}
+        {usage.indexedDBUsage !== undefined
+          ? `，IndexedDB 数据约 ${formatBytes(usage.indexedDBUsage)}（含保留的模型列表）`
+          : ""}
+        {usage.cacheUsage !== undefined ? `，离线应用缓存约 ${formatBytes(usage.cacheUsage)}` : ""}
+        。
+      </>
+    );
+  }
+  return <>{recordSummary}{`本站总占用约 ${formatBytes(usage.usage)}（包含离线应用缓存，不等于记录大小）。`}</>;
 }
 
 function formatBytes(bytes: number): string {

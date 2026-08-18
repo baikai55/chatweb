@@ -80,8 +80,16 @@ function runTransaction<T>(
       new Promise<T>((resolve, reject) => {
         const transaction = db.transaction(storeName, mode);
         const request = action(transaction.objectStore(storeName));
-        request.onsuccess = () => resolve(request.result);
+        let result: T;
+        let requestSucceeded = false;
+        request.onsuccess = () => {
+          result = request.result;
+          requestSucceeded = true;
+        };
         request.onerror = () => reject(request.error ?? new Error("数据库操作失败"));
+        transaction.oncomplete = () => {
+          if (requestSucceeded) resolve(result);
+        };
         transaction.onabort = () => reject(transaction.error ?? new Error("数据库事务被中断"));
       }),
   );
@@ -97,6 +105,10 @@ export function idbPut<T>(storeName: string, value: T): Promise<IDBValidKey> {
 
 export function idbDelete(storeName: string, key: IDBValidKey): Promise<undefined> {
   return runTransaction(storeName, "readwrite", (store) => store.delete(key));
+}
+
+export function idbGetAll<T>(storeName: string): Promise<T[]> {
+  return runTransaction<T[]>(storeName, "readonly", (store) => store.getAll());
 }
 
 /** 按 scope 取全部，已按 updatedAt 升序，调用方通常要 reverse。 */
@@ -144,9 +156,69 @@ export function idbClear(storeName: string): Promise<undefined> {
   return runTransaction(storeName, "readwrite", (store) => store.clear());
 }
 
-/** 估算已用配额，用来在设置里显示"占用了多少空间"。 */
-export async function estimateUsage(): Promise<{ usage: number; quota: number } | null> {
+export type StorageUsage = {
+  usage: number;
+  quota: number;
+  recordUsage?: number;
+  cacheUsage?: number;
+  indexedDBUsage?: number;
+};
+
+/** 估算整个站点已用配额；浏览器支持时同时返回缓存和 IndexedDB 明细。 */
+export async function estimateUsage(): Promise<StorageUsage | null> {
   if (typeof navigator === "undefined" || !navigator.storage?.estimate) return null;
-  const estimate = await navigator.storage.estimate();
-  return { usage: estimate.usage ?? 0, quota: estimate.quota ?? 0 };
+  const [estimate, recordUsage] = await Promise.all([
+    navigator.storage.estimate() as Promise<StorageEstimate & {
+      usageDetails?: Record<string, number | undefined>;
+    }>,
+    estimateRecordUsage().catch(() => undefined),
+  ]);
+  const cacheUsage = estimate.usageDetails?.caches;
+  const indexedDBUsage = estimate.usageDetails?.indexedDB;
+  return {
+    usage: estimate.usage ?? 0,
+    quota: estimate.quota ?? 0,
+    ...(typeof recordUsage === "number" ? { recordUsage } : {}),
+    ...(typeof cacheUsage === "number" ? { cacheUsage } : {}),
+    ...(typeof indexedDBUsage === "number" ? { indexedDBUsage } : {}),
+  };
+}
+
+async function estimateRecordUsage(): Promise<number> {
+  const [sessions, generations] = await Promise.all([
+    idbGetAll<unknown>(STORE_SESSIONS),
+    idbGetAll<unknown>(STORE_GENERATIONS),
+  ]);
+  return estimateStoredValueBytes(sessions) + estimateStoredValueBytes(generations);
+}
+
+/** 估算结构化克隆值的有效载荷大小，Blob 按真实字节数计。 */
+export function estimateStoredValueBytes(value: unknown, seen = new WeakSet<object>()): number {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "string") return utf8ByteLength(value);
+  if (typeof value === "number" || typeof value === "bigint") return 8;
+  if (typeof value === "boolean") return 4;
+  if (typeof value !== "object") return 0;
+  if (value instanceof Blob) return value.size;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (value instanceof Date) return 8;
+  if (seen.has(value)) return 0;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.reduce((total, item) => total + estimateStoredValueBytes(item, seen), 0);
+  }
+  return Object.entries(value).reduce(
+    (total, [key, item]) => total + utf8ByteLength(key) + estimateStoredValueBytes(item, seen),
+    0,
+  );
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return bytes;
 }

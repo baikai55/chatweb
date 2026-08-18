@@ -44,7 +44,7 @@ const INITIAL_STATE: VoiceCallState = {
   phase: "preparing",
   elapsedMs: 0,
   muted: false,
-  soundEnabled: true,
+  soundEnabled: false,
   latestUserText: "",
   latestAssistantText: "",
   error: "",
@@ -79,7 +79,7 @@ export function useVoiceCall({
   const startedAtRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mutedRef = useRef(false);
-  const soundEnabledRef = useRef(true);
+  const soundEnabledRef = useRef(false);
 
   const patchState = useCallback((patch: Partial<VoiceCallState>) => {
     const next = { ...stateRef.current, ...patch };
@@ -303,7 +303,7 @@ export function useVoiceCall({
     const sequence = callSequenceRef.current + 1;
     callSequenceRef.current = sequence;
     mutedRef.current = false;
-    soundEnabledRef.current = true;
+    soundEnabledRef.current = false;
     startedAtRef.current = Date.now();
     const audio = new Audio();
     audio.preload = "auto";
@@ -333,7 +333,7 @@ export function useVoiceCall({
     if (!stateRef.current.open) return;
     cleanupActiveCall(true);
     mutedRef.current = false;
-    soundEnabledRef.current = true;
+    soundEnabledRef.current = false;
     setState(INITIAL_STATE);
     stateRef.current = INITIAL_STATE;
   }, [cleanupActiveCall]);
@@ -402,15 +402,6 @@ export function useVoiceCall({
   useEffect(() => () => {
     if (stateRef.current.open) cleanupActiveCall(true);
   }, [cleanupActiveCall]);
-
-  useEffect(() => {
-    if (!state.open) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [state.open]);
 
   useEffect(() => {
     const handleVisibility = () => {

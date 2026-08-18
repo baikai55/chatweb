@@ -91,6 +91,7 @@ function Console({
 }) {
   const [mode, setMode] = useState<ConsoleMode>("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [voiceCallActive, setVoiceCallActive] = useState(false);
   /**
    * 模型页的草稿放在这里而不是设置页里 —— 设置页一关就卸载，
    * 勾了一半跳去看一眼对话再回来不该白勾。
@@ -167,16 +168,37 @@ function Console({
       backend={backend}
       backends={backends}
       mode={mode}
-      onModeChange={(next) => { setMode(next); setSettingsOpen(false); }}
-      onBackendChange={onActivate}
+      navigationLocked={voiceCallActive}
+      onModeChange={(next) => {
+        if (voiceCallActive) return;
+        setMode(next);
+        setSettingsOpen(false);
+      }}
+      onBackendChange={(id) => {
+        if (!voiceCallActive) onActivate(id);
+      }}
       settingsOpen={settingsOpen}
-      onToggleSettings={() => setSettingsOpen((open) => !open)}
+      onToggleSettings={() => {
+        if (!voiceCallActive) setSettingsOpen((open) => !open);
+      }}
       sessions={chat.sessions}
       currentSessionId={chat.current.id}
-      onOpenSession={(id) => { chat.open(id); setSettingsOpen(false); }}
-      onDeleteSession={chat.remove}
-      onClearSessions={chat.clearAll}
-      onNewChat={() => { chat.startNew(chatModels[0]?.id ?? ""); setSettingsOpen(false); }}
+      onOpenSession={(id) => {
+        if (voiceCallActive) return;
+        chat.open(id);
+        setSettingsOpen(false);
+      }}
+      onDeleteSession={(id) => {
+        if (!voiceCallActive) chat.remove(id);
+      }}
+      onClearSessions={() => {
+        if (!voiceCallActive) chat.clearAll();
+      }}
+      onNewChat={() => {
+        if (voiceCallActive) return;
+        chat.startNew(chatModels[0]?.id ?? "");
+        setSettingsOpen(false);
+      }}
     >
       {settingsOpen ? (
         <SettingsView
@@ -209,6 +231,7 @@ function Console({
           session={chat.current}
           onCommit={chat.commit}
           onManage={() => setSettingsOpen(true)}
+          onVoiceCallActiveChange={setVoiceCallActive}
         />
       ) : mode === "image" ? (
         <ImagePanel

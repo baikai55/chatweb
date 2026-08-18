@@ -1,7 +1,9 @@
 import {
+  ArrowLeft,
   AudioLines,
   CircleAlert,
   Loader2,
+  Maximize2,
   Mic,
   MicOff,
   PhoneOff,
@@ -34,6 +36,7 @@ export type VoiceCallOverlayProps = {
   latestUserText?: string;
   latestAssistantText?: string;
   error?: string;
+  onMinimize: () => void;
   onToggleMute: () => void;
   onToggleSound: () => void;
   onInterrupt: () => void;
@@ -100,6 +103,7 @@ export function VoiceCallOverlay({
   latestUserText,
   latestAssistantText,
   error,
+  onMinimize,
   onToggleMute,
   onToggleSound,
   onInterrupt,
@@ -112,6 +116,15 @@ export function VoiceCallOverlay({
     if (!open) return;
     const frame = requestAnimationFrame(() => dialogRef.current?.focus());
     return () => cancelAnimationFrame(frame);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
   }, [open]);
 
   if (!open) return null;
@@ -127,6 +140,12 @@ export function VoiceCallOverlay({
   const controlsDisabled = phase === "preparing" || hasError;
 
   function keepFocusInside(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onMinimize();
+      return;
+    }
     if (event.key !== "Tab" || !dialogRef.current) return;
     const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
       "button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
@@ -176,7 +195,17 @@ export function VoiceCallOverlay({
       className="fixed inset-0 z-[60] flex h-dvh flex-col overflow-hidden bg-background text-foreground outline-none safe-area-top safe-area-bottom"
       onKeyDown={keepFocusInside}
     >
-      <header className="flex h-14 shrink-0 items-center justify-center border-b px-4">
+      <header className="relative flex h-14 shrink-0 items-center justify-center border-b px-14">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="absolute left-3 size-11 rounded-full"
+          aria-label="最小化通话"
+          onClick={onMinimize}
+        >
+          <ArrowLeft className="size-5" />
+        </Button>
         <div className="text-center">
           <p className="text-xs text-muted-foreground">语音通话</p>
           <p className="mt-0.5 text-sm font-medium tabular-nums">{formatElapsed(elapsedMs)}</p>
@@ -244,6 +273,83 @@ export function VoiceCallOverlay({
         </div>
       </footer>
     </div>
+  );
+}
+
+export type VoiceCallMiniWindowProps = Pick<VoiceCallOverlayProps,
+  "open" | "phase" | "modelName" | "elapsedMs" | "muted" | "error" | "onEnd"
+> & {
+  onExpand: () => void;
+};
+
+export function VoiceCallMiniWindow({
+  open,
+  phase,
+  modelName,
+  elapsedMs,
+  muted,
+  error,
+  onExpand,
+  onEnd,
+}: VoiceCallMiniWindowProps) {
+  const expandButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => expandButtonRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+
+  if (!open) return null;
+
+  const hasError = phase === "error" || Boolean(error?.trim());
+  const presentation = hasError ? PHASE_PRESENTATIONS.error : PHASE_PRESENTATIONS[phase];
+  const StatusIcon = muted && phase === "paused" ? MicOff : presentation.icon;
+  const assistantName = modelName.trim() || "语音助手";
+
+  return (
+    <aside
+      aria-label="正在进行的语音通话"
+      className="fixed right-3 top-[calc(6rem+env(safe-area-inset-top,0px))] z-[55] flex w-[min(16rem,calc(100vw-1.5rem))] items-center gap-2 rounded-lg border bg-background p-2 shadow-lg lg:top-14"
+    >
+      <button
+        ref={expandButtonRef}
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={`返回语音通话，${assistantName}，${presentation.label}，${formatElapsed(elapsedMs)}`}
+        onClick={onExpand}
+      >
+        <span className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary",
+          hasError && "bg-destructive/10 text-destructive",
+        )}>
+          <StatusIcon className={cn("size-4", presentation.busy && "animate-spin")} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5 text-xs font-medium">
+            <span className="truncate">{assistantName}</span>
+            <span className="shrink-0 tabular-nums text-muted-foreground">{formatElapsed(elapsedMs)}</span>
+          </span>
+          <span aria-live="polite" className={cn(
+            "mt-0.5 block truncate text-xs text-muted-foreground",
+            hasError && "text-destructive",
+          )}>
+            {presentation.label}
+          </span>
+        </span>
+        <Maximize2 aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+      </button>
+
+      <Button
+        type="button"
+        variant="destructive"
+        size="icon"
+        className="size-11 shrink-0 rounded-full"
+        aria-label="结束语音通话"
+        onClick={onEnd}
+      >
+        <PhoneOff className="size-4" />
+      </Button>
+    </aside>
   );
 }
 

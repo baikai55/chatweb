@@ -39,6 +39,7 @@ export function AppShell({
   backend,
   backends,
   mode,
+  navigationLocked = false,
   onModeChange,
   onBackendChange,
   settingsOpen,
@@ -54,6 +55,7 @@ export function AppShell({
   backend: Backend;
   backends: Backend[];
   mode: ConsoleMode;
+  navigationLocked?: boolean;
   onModeChange: (mode: ConsoleMode) => void;
   onBackendChange: (id: string) => void;
   settingsOpen: boolean;
@@ -108,7 +110,11 @@ export function AppShell({
           </Button>
         </div>
 
-        <nav className="flex flex-col gap-0.5 p-2">
+        <nav
+          className={cn("flex flex-col gap-0.5 p-2", navigationLocked && "opacity-50")}
+          inert={navigationLocked || undefined}
+          aria-disabled={navigationLocked || undefined}
+        >
           {MODES.filter((item) => modes.includes(item.mode)).map((item) => (
             <button
               key={item.mode}
@@ -126,14 +132,20 @@ export function AppShell({
         </nav>
 
         {mode === "chat" && !settingsOpen ? (
-          <SessionList
-            sessions={sessions}
-            currentId={currentSessionId}
-            onOpen={(id) => { onOpenSession(id); setDrawerOpen(false); }}
-            onDelete={onDeleteSession}
-            onClearAll={onClearSessions}
-            onNew={() => { onNewChat(); setDrawerOpen(false); }}
-          />
+          <div
+            className={cn("flex min-h-0 flex-1 flex-col", navigationLocked && "opacity-50")}
+            inert={navigationLocked || undefined}
+            aria-disabled={navigationLocked || undefined}
+          >
+            <SessionList
+              sessions={sessions}
+              currentId={currentSessionId}
+              onOpen={(id) => { onOpenSession(id); setDrawerOpen(false); }}
+              onDelete={onDeleteSession}
+              onClearAll={onClearSessions}
+              onNew={() => { onNewChat(); setDrawerOpen(false); }}
+            />
+          </div>
         ) : null}
 
         {/*
@@ -150,7 +162,7 @@ export function AppShell({
         />
 
         <div className="flex flex-col gap-1.5 border-t p-2">
-          <Select value={backend.id} onValueChange={onBackendChange}>
+          <Select value={backend.id} onValueChange={onBackendChange} disabled={navigationLocked}>
             <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               {backends.map((item) => (
@@ -164,6 +176,7 @@ export function AppShell({
               variant="ghost"
               size="sm"
               className={cn("h-8 flex-1 justify-start gap-2 px-2 text-xs font-normal", settingsOpen && "bg-sidebar-accent")}
+              disabled={navigationLocked}
               onClick={onToggleSettings}
             >
               <Settings2 className="size-3.5" />设置
@@ -176,7 +189,13 @@ export function AppShell({
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5 safe-area-top lg:hidden">
-          <Button variant="ghost" size="icon" className="size-8" onClick={() => setDrawerOpen(true)}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            disabled={navigationLocked}
+            onClick={() => setDrawerOpen(true)}
+          >
             <PanelLeft className="size-4" />
           </Button>
           <span className="text-sm font-medium">
