@@ -25,7 +25,6 @@ import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/feature
 import { GenerationHistory } from "@/features/history/generation-history";
 import { hydrateAssets, toAsset, type GenerationRecord } from "@/features/history/generation-store";
 import { useGenerationHistory } from "@/features/history/use-generation-history";
-import { useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
 import { ttsRouteVariables } from "@/transport/tts-routes";
 import {
@@ -73,7 +72,6 @@ export type VoicePanelProps = {
 };
 
 export function VoicePanel({ backend, backends, catalogsByBackendId, models, onManage }: VoicePanelProps) {
-  const settings = useAppSettings();
   /**
    * 能不能用只看设置页勾了什么，**不看后端方言**。
    *
@@ -776,7 +774,6 @@ export function VoicePanel({ backend, backends, catalogsByBackendId, models, onM
                   <div className="flex min-h-36 flex-col items-center justify-center gap-3 rounded-lg border border-dashed px-4 text-muted-foreground">
                     <div className="flex max-w-full flex-wrap items-center justify-center gap-2">
                       <AudioRecorderButton
-                        mode={settings.recordingMode}
                         disabled={activeRequest !== null}
                         disabledReason="语音请求完成后才能录音"
                         onPhaseChange={setRecorderPhase}

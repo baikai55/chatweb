@@ -3,10 +3,9 @@ import { describe, expect, it } from "vitest";
 import { SEARCH_PROVIDERS, appSettingsSchema } from "@/shared/settings/app-settings";
 
 describe("appSettingsSchema", () => {
-  it("新安装默认隐藏聊天麦克风并使用按住说话", () => {
+  it("新安装默认隐藏聊天麦克风", () => {
     expect(appSettingsSchema.parse({})).toMatchObject({
       showChatMicrophone: false,
-      recordingMode: "hold",
       searchProvider: "auto",
       searchApiKey: "",
       searchBaseUrl: "",
@@ -23,7 +22,6 @@ describe("appSettingsSchema", () => {
       submitMode: "ctrl-enter",
       clearInputAfterSubmit: true,
       showChatMicrophone: false,
-      recordingMode: "hold",
       searchProvider: "auto",
       searchApiKey: "",
       searchBaseUrl: "",
@@ -32,18 +30,16 @@ describe("appSettingsSchema", () => {
     });
   });
 
-  it("接受用户选择显示麦克风和点击录音模式", () => {
+  it("接受用户选择显示麦克风", () => {
     expect(appSettingsSchema.parse({
       showChatMicrophone: true,
-      recordingMode: "toggle",
     })).toMatchObject({
       showChatMicrophone: true,
-      recordingMode: "toggle",
     });
   });
 
-  it("拒绝未知录音模式", () => {
-    expect(appSettingsSchema.safeParse({ recordingMode: "automatic" }).success).toBe(false);
+  it("忽略旧版录音操作方式设置", () => {
+    expect(appSettingsSchema.parse({ recordingMode: "toggle" })).not.toHaveProperty("recordingMode");
   });
 
   it.each(SEARCH_PROVIDERS)("接受函数搜索源 %s", (searchProvider) => {

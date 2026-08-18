@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Loader2, Mic, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
+import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -105,6 +105,7 @@ export function ChatPanel({
   const [draggingImages, setDraggingImages] = useState(false);
   const [streaming, setStreaming] = useState<ChatStreamSnapshot | null>(null);
   const [error, setError] = useState("");
+  const [voiceInputMode, setVoiceInputMode] = useState(false);
   const [recorderPhase, setRecorderPhase] = useState<RecorderPhase>("idle");
   const [transcribing, setTranscribing] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("");
@@ -123,6 +124,7 @@ export function ChatPanel({
   const requestSequenceRef = useRef(0);
   const sttSequenceRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dragDepthRef = useRef(0);
   const readingImageStatsRef = useRef({ count: 0, bytes: 0 });
   const currentSessionIdRef = useRef(session.id);
@@ -137,6 +139,7 @@ export function ChatPanel({
     setDraggingImages(false);
     setStreaming(null);
     setError("");
+    setVoiceInputMode(false);
     setRecorderPhase("idle");
     setTranscribing(false);
     setVoiceStatus("");
@@ -288,6 +291,22 @@ export function ChatPanel({
   function handleRecorderError(recorderError: AudioRecorderError) {
     setVoiceStatus("");
     setVoiceError(recorderError.message);
+    setVoiceInputMode(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  function enterVoiceInputMode() {
+    setVoiceStatus("");
+    setVoiceError("");
+    textareaRef.current?.blur();
+    setVoiceInputMode(true);
+  }
+
+  function leaveVoiceInputMode() {
+    if (recorderPhase !== "idle") return;
+    if (transcribing) cancelTranscription();
+    setVoiceInputMode(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   function cancelTranscription() {
@@ -339,6 +358,8 @@ export function ChatPanel({
       if (!transcription) throw new Error("语音识别没有返回文字");
       setInput((current) => appendTranscriptionToDraft(current, transcription));
       setVoiceStatus("");
+      setVoiceInputMode(false);
+      requestAnimationFrame(() => textareaRef.current?.focus());
     } catch (caught) {
       if (!isCurrent()) return;
       setVoiceStatus("");
@@ -661,95 +682,133 @@ export function ChatPanel({
                 event.target.value = "";
               }}
             />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label="添加图片"
-                  disabled={models.length === 0 || streaming !== null || voiceBusy}
-                  className="size-9 shrink-0 rounded-full text-muted-foreground"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <ImagePlus className="size-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>添加图片</TooltipContent>
-            </Tooltip>
-
-            {settings.showChatMicrophone ? (
-              transcribing ? (
+            {voiceInputMode ? (
+              <>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      aria-label="取消语音识别"
+                      aria-label="切换到文字输入"
+                      disabled={recorderPhase !== "idle"}
                       className="size-9 shrink-0 rounded-full text-muted-foreground"
-                      onClick={cancelTranscription}
+                      onClick={leaveVoiceInputMode}
                     >
-                      <Square className="size-3.5 fill-current" />
+                      <Keyboard className="size-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>取消语音识别</TooltipContent>
+                  <TooltipContent>切换到文字输入</TooltipContent>
                 </Tooltip>
-              ) : chatSTTReady ? (
-                <AudioRecorderButton
-                  key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
-                  mode={settings.recordingMode}
-                  disabled={models.length === 0 || streaming !== null}
-                  disabledReason={streaming ? "回复完成后才能录音" : undefined}
-                  onPhaseChange={handleRecorderPhaseChange}
-                  onRecorded={(recording) => { void transcribeRecording(recording); }}
-                  onError={handleRecorderError}
-                  className="text-muted-foreground"
-                />
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label="设置语音转写供应商"
-                      disabled={streaming !== null}
-                      className="size-9 shrink-0 rounded-full text-muted-foreground"
-                      onClick={onManage}
-                    >
-                      <Mic className="size-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>{sttConnection.reason || "请在设置的“语音”页选择语音转写供应商和模型"}</TooltipContent>
-                </Tooltip>
-              )
-            ) : null}
 
-            <Textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={onKeyDown}
-              onPaste={handlePaste}
-              placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
-              rows={1}
-              disabled={models.length === 0}
-              className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
-            />
-            {streaming ? (
-              <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
-                <Square className="size-3.5 fill-current" />
-              </Button>
+                {transcribing ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-10 min-w-0 flex-1 gap-2 rounded-xl"
+                    onClick={cancelTranscription}
+                  >
+                    <Square className="size-3.5 fill-current" />
+                    正在识别，点击取消
+                  </Button>
+                ) : (
+                  <AudioRecorderButton
+                    key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
+                    wide
+                    disabled={models.length === 0 || streaming !== null}
+                    disabledReason={streaming ? "回复完成后才能录音" : undefined}
+                    onPhaseChange={handleRecorderPhaseChange}
+                    onRecorded={(recording) => { void transcribeRecording(recording); }}
+                    onError={handleRecorderError}
+                    className="border bg-secondary/55 text-foreground"
+                    containerClassName="min-w-0 flex-1"
+                  />
+                )}
+              </>
             ) : (
-              <Button
-                type="submit"
-                size="icon"
-                className="size-9 shrink-0 rounded-full"
-                disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || voiceBusy || !model}
-                aria-label={readingImages > 0 ? "正在读取图片" : "发送"}
-              >
-                {readingImages > 0 ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-              </Button>
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="添加图片"
+                      disabled={models.length === 0 || streaming !== null || voiceBusy}
+                      className="size-9 shrink-0 rounded-full text-muted-foreground"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <ImagePlus className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>添加图片</TooltipContent>
+                </Tooltip>
+
+                {settings.showChatMicrophone ? (
+                  chatSTTReady ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label="切换到语音输入"
+                          disabled={models.length === 0 || streaming !== null || voiceBusy}
+                          className="size-9 shrink-0 rounded-full text-muted-foreground"
+                          onClick={enterVoiceInputMode}
+                        >
+                          <Mic className="size-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>切换到语音输入</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label="设置语音转写供应商"
+                          disabled={streaming !== null}
+                          className="size-9 shrink-0 rounded-full text-muted-foreground"
+                          onClick={onManage}
+                        >
+                          <Mic className="size-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{sttConnection.reason || "请在设置的“语音”页选择语音转写供应商和模型"}</TooltipContent>
+                    </Tooltip>
+                  )
+                ) : null}
+
+                <Textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onKeyDown}
+                  onPaste={handlePaste}
+                  placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
+                  rows={1}
+                  disabled={models.length === 0}
+                  className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
+                />
+                {streaming ? (
+                  <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
+                    <Square className="size-3.5 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    type="submit"
+                    size="icon"
+                    className="size-9 shrink-0 rounded-full"
+                    disabled={(!input.trim() && pendingImages.length === 0) || readingImages > 0 || voiceBusy || !model}
+                    aria-label={readingImages > 0 ? "正在读取图片" : "发送"}
+                  >
+                    {readingImages > 0 ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                  </Button>
+                )}
+              </>
             )}
           </div>
 

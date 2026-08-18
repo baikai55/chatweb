@@ -46,7 +46,6 @@ import {
   patchAppSettings,
   requestNotificationPermission,
   useAppSettings,
-  type RecordingMode,
   type SearchProvider,
   type SubmitMode,
 } from "@/shared/settings/app-settings";
@@ -966,21 +965,6 @@ function VoiceSettingsSection({
               checked={settings.showChatMicrophone}
               onChange={() => patchAppSettings({ showChatMicrophone: !settings.showChatMicrophone })}
               label="聊天框显示麦克风"
-            />
-          }
-        />
-        <SettingRow
-          label="录音操作方式"
-          description="聊天输入框和语音页共用。按住说话会在松开时结束；点击模式需再次点击才结束。"
-          control={
-            <MiniSelect
-              value={settings.recordingMode}
-              onChange={(value) => patchAppSettings({ recordingMode: value as RecordingMode })}
-              ariaLabel="录音操作方式"
-              options={[
-                { value: "hold", label: "按住说话" },
-                { value: "toggle", label: "点击开始/停止" },
-              ]}
             />
           }
         />

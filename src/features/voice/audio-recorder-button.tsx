@@ -19,10 +19,7 @@ import {
 import { useAudioRecorder } from "@/features/voice/use-audio-recorder";
 import { cn } from "@/shared/lib/cn";
 
-export type RecorderInteractionMode = "hold" | "toggle";
-
 export type AudioRecorderButtonProps = {
-  mode: RecorderInteractionMode;
   onRecorded: (result: RecordedAudio) => void;
   onError?: (error: AudioRecorderError) => void;
   onPhaseChange?: (phase: RecorderPhase) => void;
@@ -31,6 +28,8 @@ export type AudioRecorderButtonProps = {
   minDurationMs?: number;
   /** 在按钮旁额外显示权限请求、计时和错误文字；按钮本身仍会显示录音计时。 */
   showStatus?: boolean;
+  /** 让触发按钮占满容器，并显示“按住说话”等文字，供聊天输入框使用。 */
+  wide?: boolean;
   className?: string;
   containerClassName?: string;
 };
@@ -43,7 +42,6 @@ export function formatRecordingElapsed(elapsedMs: number): string {
 }
 
 export function AudioRecorderButton({
-  mode,
   onRecorded,
   onError,
   onPhaseChange,
@@ -51,6 +49,7 @@ export function AudioRecorderButton({
   disabledReason,
   minDurationMs,
   showStatus = false,
+  wide = false,
   className,
   containerClassName,
 }: AudioRecorderButtonProps) {
@@ -64,7 +63,6 @@ export function AudioRecorderButton({
   const keyboardActiveRef = useRef(false);
   const ignoreNextClickRef = useRef(false);
   const virtualHoldRef = useRef(false);
-  const previousModeRef = useRef(mode);
   const phaseRef = useRef(snapshot.phase);
   const onPhaseChangeRef = useRef(onPhaseChange);
   const statusId = useId();
@@ -93,11 +91,6 @@ export function AudioRecorderButton({
   }, [cancel, clearInteraction]);
 
   useEffect(() => {
-    if (previousModeRef.current !== mode) cancelInteraction();
-    previousModeRef.current = mode;
-  }, [cancelInteraction, mode]);
-
-  useEffect(() => {
     if (disabled) cancelInteraction();
   }, [cancelInteraction, disabled]);
 
@@ -119,6 +112,12 @@ export function AudioRecorderButton({
     void start();
   }, [clearError, start]);
 
+  const finishRecording = useCallback(() => {
+    // 用户可能在权限弹窗出现前就已松手。此时取消即可，不应制造“录音被中断”错误。
+    if (phaseRef.current === "requesting") cancel();
+    else stop();
+  }, [cancel, stop]);
+
   const releasePointer = useCallback((pointerId: number) => {
     activePointerIdRef.current = null;
     const button = buttonRef.current;
@@ -130,11 +129,11 @@ export function AudioRecorderButton({
   }, []);
 
   useEffect(() => {
-    if (mode !== "hold" || typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
     const handleWindowPointerUp = (event: PointerEvent) => {
       if (activePointerIdRef.current !== event.pointerId) return;
       releasePointer(event.pointerId);
-      stop();
+      finishRecording();
     };
     const handleWindowPointerCancel = (event: PointerEvent) => {
       if (activePointerIdRef.current !== event.pointerId) return;
@@ -147,10 +146,10 @@ export function AudioRecorderButton({
       window.removeEventListener("pointerup", handleWindowPointerUp);
       window.removeEventListener("pointercancel", handleWindowPointerCancel);
     };
-  }, [cancelInteraction, mode, releasePointer, stop]);
+  }, [cancelInteraction, finishRecording, releasePointer]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (mode !== "hold" || disabled || snapshot.phase !== "idle") return;
+    if (disabled || snapshot.phase !== "idle") return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (activePointerIdRef.current !== null) return;
     event.preventDefault();
@@ -165,10 +164,10 @@ export function AudioRecorderButton({
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (mode !== "hold" || activePointerIdRef.current !== event.pointerId) return;
+    if (activePointerIdRef.current !== event.pointerId) return;
     event.preventDefault();
     releasePointer(event.pointerId);
-    stop();
+    finishRecording();
   };
 
   const handlePointerCancel = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -183,7 +182,7 @@ export function AudioRecorderButton({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (mode !== "hold" || disabled || !isActivationKey(event.key)) return;
+    if (disabled || !isActivationKey(event.key)) return;
     event.preventDefault();
     if (event.repeat || keyboardActiveRef.current || snapshot.phase !== "idle") return;
     keyboardActiveRef.current = true;
@@ -193,10 +192,10 @@ export function AudioRecorderButton({
   };
 
   const handleKeyUp = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (mode !== "hold" || !isActivationKey(event.key) || !keyboardActiveRef.current) return;
+    if (!isActivationKey(event.key) || !keyboardActiveRef.current) return;
     event.preventDefault();
     keyboardActiveRef.current = false;
-    stop();
+    finishRecording();
     globalThis.setTimeout(() => {
       ignoreNextClickRef.current = false;
     }, 0);
@@ -210,7 +209,7 @@ export function AudioRecorderButton({
   const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
     // 按住模式的鼠标/触摸 click 是 pointerup 的尾随事件，录音已在 pointerup 结束。
     // detail=0 则是屏幕阅读器的虚拟 click，需要保留为可访问的“点按开始/结束”。
-    if (mode === "hold" && event.detail > 0) return;
+    if (event.detail > 0) return;
     if (ignoreNextClickRef.current) {
       ignoreNextClickRef.current = false;
       return;
@@ -218,19 +217,19 @@ export function AudioRecorderButton({
     if (disabled || snapshot.phase === "stopping") return;
     event.preventDefault();
 
-    // toggle 模式以及屏幕阅读器产生的虚拟 click 都采用“再点一次结束”。
+    // 屏幕阅读器产生的虚拟 click 没有“按住”，用再点一次结束作为等价操作。
     if (snapshot.phase === "idle") {
-      virtualHoldRef.current = mode === "hold";
+      virtualHoldRef.current = true;
       beginRecording();
     } else {
       virtualHoldRef.current = false;
-      stop();
+      finishRecording();
     }
   };
 
   const isActive = snapshot.phase !== "idle";
   const elapsed = formatRecordingElapsed(snapshot.elapsedMs);
-  const instruction = recorderInstruction(mode, snapshot.phase, virtualHoldRef.current);
+  const instruction = recorderInstruction(snapshot.phase, virtualHoldRef.current);
   const activeStatus = snapshot.phase === "recording" || snapshot.phase === "stopping"
     ? `${instruction} ${elapsed}`
     : instruction;
@@ -245,16 +244,20 @@ export function AudioRecorderButton({
     <div className={cn("inline-flex min-w-0 items-center gap-2", containerClassName)}>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="inline-flex shrink-0">
+          <span className={cn("inline-flex", wide ? "min-w-0 flex-1" : "shrink-0")}>
             <Button
               ref={buttonRef}
               type="button"
-              size="icon"
+              size={wide ? "default" : "icon"}
               variant={snapshot.error ? "destructive" : isActive ? "default" : "ghost"}
-              className={cn("size-9 touch-none select-none rounded-full", className)}
+              className={cn(
+                "touch-none select-none",
+                wide ? "h-10 min-w-0 flex-1 gap-2 rounded-xl px-3" : "size-9 rounded-full",
+                className,
+              )}
               aria-label={status}
               aria-describedby={statusId}
-              aria-pressed={mode === "toggle" || virtualHoldRef.current ? isActive : undefined}
+              aria-pressed={virtualHoldRef.current ? isActive : undefined}
               disabled={disabled || snapshot.phase === "stopping"}
               onClick={handleClick}
               onPointerDown={handlePointerDown}
@@ -264,25 +267,42 @@ export function AudioRecorderButton({
               onKeyDown={handleKeyDown}
               onKeyUp={handleKeyUp}
               onBlur={handleBlur}
-              onContextMenu={(event) => {
-                if (mode === "hold") event.preventDefault();
-              }}
+              onContextMenu={(event) => event.preventDefault()}
             >
               {snapshot.phase === "requesting" ? (
-                <Loader2 className="animate-spin" />
+                wide ? (
+                  <span className="flex items-center gap-2" aria-hidden="true">
+                    <Loader2 className="size-4 animate-spin" />
+                    正在请求麦克风权限
+                  </span>
+                ) : <Loader2 className="animate-spin" />
               ) : snapshot.phase === "recording" || snapshot.phase === "stopping" ? (
-                <span className="flex flex-col items-center justify-center gap-0 leading-none" aria-hidden="true">
-                  {snapshot.phase === "stopping" ? (
-                    <Loader2 className="!size-3 animate-spin" />
-                  ) : mode === "toggle" || virtualHoldRef.current ? (
-                    <Square className="!size-3 fill-current" />
-                  ) : (
-                    <Mic className="!size-3 animate-pulse" />
+                <span
+                  className={cn(
+                    "flex items-center justify-center leading-none",
+                    wide ? "gap-2" : "flex-col gap-0",
                   )}
-                  <span className="text-[9px] font-semibold leading-[10px]">{elapsed}</span>
+                  aria-hidden="true"
+                >
+                  {snapshot.phase === "stopping" ? (
+                    <Loader2 className={cn("animate-spin", wide ? "!size-4" : "!size-3")} />
+                  ) : virtualHoldRef.current ? (
+                    <Square className={cn("fill-current", wide ? "!size-4" : "!size-3")} />
+                  ) : (
+                    <Mic className={cn("animate-pulse", wide ? "!size-4" : "!size-3")} />
+                  )}
+                  {wide ? <span>{instruction}</span> : null}
+                  <span className={cn("font-semibold tabular-nums", wide ? "text-xs" : "text-[9px] leading-[10px]")}>
+                    {elapsed}
+                  </span>
                 </span>
               ) : (
-                <Mic />
+                wide ? (
+                  <span className="flex items-center gap-2" aria-hidden="true">
+                    <Mic className="size-4" />
+                    按住说话
+                  </span>
+                ) : <Mic />
               )}
             </Button>
           </span>
@@ -310,16 +330,12 @@ function isActivationKey(key: string): boolean {
   return key === " " || key === "Enter";
 }
 
-function recorderInstruction(
-  mode: RecorderInteractionMode,
-  phase: RecorderPhase,
-  virtualHold: boolean,
-): string {
+function recorderInstruction(phase: RecorderPhase, virtualHold: boolean): string {
   if (phase === "requesting") return "正在请求麦克风权限";
   if (phase === "stopping") return "正在结束录音";
   if (phase === "recording") {
-    if (mode === "toggle" || virtualHold) return "点击结束录音";
+    if (virtualHold) return "点击结束录音";
     return "松开结束录音";
   }
-  return mode === "hold" ? "按住说话" : "点击开始录音";
+  return "按住说话";
 }
