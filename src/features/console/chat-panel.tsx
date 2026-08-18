@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
+import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, Phone, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -29,6 +29,9 @@ import { ModelPicker } from "@/features/console/model-picker";
 import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/voice/audio-file";
 import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
+import { resolveVoiceCallConfig } from "@/features/voice/voice-call-config";
+import { VoiceCallOverlay } from "@/features/voice/voice-call-overlay";
+import { useVoiceCall } from "@/features/voice/use-voice-call";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -50,6 +53,12 @@ type PendingImage = ImageInputFile;
 type DisplayContent = {
   text: string;
   imageUrls: string[];
+};
+
+type SendOutcome = {
+  status: "completed" | "aborted" | "failed" | "stale";
+  text: string;
+  error?: string;
 };
 
 function splitMessageContent(content: ChatMessageContent): DisplayContent {
@@ -125,11 +134,19 @@ export function ChatPanel({
   const sttSequenceRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const voiceCallButtonRef = useRef<HTMLButtonElement | null>(null);
   const dragDepthRef = useRef(0);
   const readingImageStatsRef = useRef({ count: 0, bytes: 0 });
   const currentSessionIdRef = useRef(session.id);
   currentSessionIdRef.current = session.id;
+  const latestSessionRef = useRef(session);
+  latestSessionRef.current = session;
   const settings = useAppSettings();
+
+  const commitSession = useCallback((next: ChatSession) => {
+    latestSessionRef.current = next;
+    onCommit(next);
+  }, [onCommit]);
 
   // 草稿属于当前会话。切换历史时丢掉尚未发送的图片，避免误发到另一段对话。
   useEffect(() => {
@@ -162,11 +179,23 @@ export function ChatPanel({
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
   const sttConnection = resolveVoiceConnection(backend, backends, "stt");
+  const ttsConnection = resolveVoiceConnection(backend, backends, "tts");
   const chatInputSTTModel = sttConnection.model;
   const chatSTTReady = sttConnection.ready;
   const voiceBusy = recorderPhase !== "idle" || transcribing;
   const searchMode = backend.webSearchModeOverrides[model] ?? "auto";
   const search = webSearchNote(model, searchMode);
+  const voiceCallConfig = resolveVoiceCallConfig({
+    chatModel: model,
+    sttConnection,
+    ttsConnection,
+  });
+  const voiceCall = useVoiceCall({
+    config: voiceCallConfig,
+    contextKey: `${backend.id}:${session.id}`,
+    onAssistantTurn: sendVoiceCallTurn,
+    onAbortAssistant: () => abortRef.current?.abort(),
+  });
 
   const addImageFiles = useCallback((incoming: FileList | File[]) => {
     const files = Array.from(incoming);
@@ -381,7 +410,11 @@ export function ChatPanel({
     abortRef.current?.abort();
   }, []);
 
-  async function send(messages: ConversationMessage[], base: ChatSession) {
+  async function send(
+    messages: ConversationMessage[],
+    base: ChatSession,
+    options: { notify?: boolean } = {},
+  ): Promise<SendOutcome> {
     const sequence = requestSequenceRef.current + 1;
     requestSequenceRef.current = sequence;
     const controller = new AbortController();
@@ -416,8 +449,8 @@ export function ChatPanel({
         signal: controller.signal,
       });
 
-      if (!isCurrentRequest()) return;
-      onCommit({
+      if (!isCurrentRequest()) return { status: "stale", text: "" };
+      const committed: ChatSession = {
         ...base,
         messages: [...messages, {
           id: createMessageId(),
@@ -428,15 +461,17 @@ export function ChatPanel({
           nativeFinishReason: result.nativeFinishReason,
         }],
         updatedAt: Date.now(),
-      });
-      notifyTaskDone("回复完成", result.text.slice(0, 120) || base.model);
+      };
+      commitSession(committed);
+      if (options.notify !== false) notifyTaskDone("回复完成", result.text.slice(0, 120) || base.model);
+      return { status: "completed", text: result.text };
     } catch (caught) {
-      if (!isCurrentRequest()) return;
+      if (!isCurrentRequest()) return { status: "stale", text: "" };
       // 用户主动停止不算错误，但已经流出来的内容要保留下来
       if (isAbortError(caught)) {
         const snapshot = streamSnapshotRef.current;
         if (snapshot && (snapshot.text || snapshot.reasoning)) {
-          onCommit({
+          commitSession({
             ...base,
             messages: [...messages, {
               id: createMessageId(),
@@ -450,13 +485,15 @@ export function ChatPanel({
           });
         } else {
           // `submit` 已经先落过用户消息；重新生成被停止时则在这里保留截断后的上下文。
-          onCommit({ ...base, messages, updatedAt: Date.now() });
+          commitSession({ ...base, messages, updatedAt: Date.now() });
         }
-        return;
+        return { status: "aborted", text: snapshot?.text ?? "" };
       }
-      setError(caught instanceof Error ? caught.message : String(caught));
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
       // 用户消息也要留住，否则报错后输入的内容就白打了
-      onCommit({ ...base, messages, updatedAt: Date.now() });
+      commitSession({ ...base, messages, updatedAt: Date.now() });
+      return { status: "failed", text: "", error: message };
     } finally {
       if (requestSequenceRef.current === sequence) {
         abortRef.current = null;
@@ -466,10 +503,46 @@ export function ChatPanel({
     }
   }
 
+  async function sendVoiceCallTurn(text: string): Promise<SendOutcome> {
+    const current = latestSessionRef.current;
+    const userMessage: ConversationMessage = {
+      id: createMessageId(),
+      role: "user",
+      content: text,
+    };
+    const messages = [...current.messages, userMessage];
+    const base: ChatSession = {
+      ...current,
+      model: voiceCallConfig.chatModel,
+      messages,
+      updatedAt: Date.now(),
+    };
+    // 先同步更新 ref：回复播完立即进入下一轮时，不必等父组件重渲染才能拿到新上下文。
+    commitSession(base);
+    return send(messages, base, { notify: false });
+  }
+
+  function startVoiceCall() {
+    if (voiceCall.state.open) return;
+    if (streaming || abortRef.current || voiceBusy) {
+      toast.error("请等当前录音或回复结束后再开始通话");
+      return;
+    }
+    const result = voiceCall.start();
+    if (result.ok) return;
+    toast.error(result.reason || "语音通话配置不可用");
+    onManage();
+  }
+
+  function endVoiceCall() {
+    voiceCall.end();
+    requestAnimationFrame(() => voiceCallButtonRef.current?.focus());
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if ((!text && pendingImages.length === 0) || readingImages > 0 || streaming || abortRef.current || voiceBusy || !model) return;
+    if (voiceCall.state.open || (!text && pendingImages.length === 0) || readingImages > 0 || streaming || abortRef.current || voiceBusy || !model) return;
     const userMessage: ConversationMessage = {
       id: createMessageId(),
       role: "user",
@@ -480,7 +553,7 @@ export function ChatPanel({
     if (settings.clearInputAfterSubmit) setInput("");
     setPendingImages([]);
     // 先落盘再请求：发送后的图片立即可见，首个响应片段前停止也不会丢消息。
-    onCommit(base);
+    commitSession(base);
     void send(messages, base);
   }
 
@@ -526,7 +599,7 @@ export function ChatPanel({
    * 丢掉的部分不进历史 —— 想留旧回复就先复制走。
    */
   function regenerateFrom(id: string) {
-    if (streaming || abortRef.current || voiceBusy) return;
+    if (voiceCall.state.open || streaming || abortRef.current || voiceBusy) return;
     setSelectedId(null);
     const index = session.messages.findIndex((message) => message.id === id);
     if (index < 0) return;
@@ -556,6 +629,7 @@ export function ChatPanel({
   return (
     /* 点消息以外的任何地方都收起操作按钮 —— 不用另外找"取消"的地方 */
     <div className="flex h-full flex-col" onClick={() => setSelectedId(null)}>
+      <div className="contents" inert={voiceCall.state.open || undefined}>
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5">
         <ModelPicker
           models={models}
@@ -596,6 +670,23 @@ export function ChatPanel({
           note={search}
           onToggle={() => onCommit({ ...session, webSearch: !session.webSearch })}
         />
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              ref={voiceCallButtonRef}
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="开始语音通话"
+              className="ml-auto size-8 shrink-0 rounded-full text-muted-foreground"
+              onClick={startVoiceCall}
+            >
+              <Phone className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>开始语音通话</TooltipContent>
+        </Tooltip>
       </div>
 
       <MessageScrollerProvider>
@@ -793,7 +884,7 @@ export function ChatPanel({
                   onPaste={handlePaste}
                   placeholder={models.length === 0 ? "先去设置里保存几个模型" : "说点什么…"}
                   rows={1}
-                  disabled={models.length === 0}
+                  disabled={models.length === 0 || voiceCall.state.open}
                   className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
                 />
                 {streaming ? (
@@ -832,6 +923,25 @@ export function ChatPanel({
           ) : null}
         </div>
       </form>
+      </div>
+
+      <VoiceCallOverlay
+        open={voiceCall.state.open}
+        phase={voiceCall.state.phase}
+        modelName={activeModel?.displayName || model}
+        elapsedMs={voiceCall.state.elapsedMs}
+        muted={voiceCall.state.muted}
+        soundEnabled={voiceCall.state.soundEnabled}
+        latestUserText={voiceCall.state.latestUserText}
+        latestAssistantText={voiceCall.state.latestAssistantText}
+        error={voiceCall.state.error}
+        onToggleMute={voiceCall.toggleMute}
+        onToggleSound={voiceCall.toggleSound}
+        onInterrupt={voiceCall.interrupt}
+        onFinishSpeaking={voiceCall.finishSpeaking}
+        onRetry={voiceCall.retry}
+        onEnd={endVoiceCall}
+      />
     </div>
   );
 }
