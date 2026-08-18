@@ -1,4 +1,4 @@
-import { Check, Copy, Download, KeyRound, Loader2, LogOut, Pencil, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Download, KeyRound, Loader2, LogOut, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
@@ -6,24 +6,37 @@ import { classifyModel, sortForBrowsing, type CatalogModel } from "@/backends/mo
 import {
   CAPABILITIES,
   MODEL_KINDS,
+  VOICE_PROTOCOLS,
   WEB_SEARCH_MODES,
   customImageRouteSchema,
+  customTTSRequestSchema,
   normalizeBaseURL,
   type Backend,
   type Capability,
   type CustomImageRoute,
+  type CustomTTSRoute,
   type ModelKind,
+  type VoiceBinding,
+  type VoiceProtocol,
   type WebSearchMode,
 } from "@/backends/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { clearAllSessions } from "@/features/console/chat-store";
 import { clearAllGenerations } from "@/features/history/generation-store";
 import { toggleCapabilitySelection } from "@/features/settings/capability-selection";
-import { listChatInputSTTModels } from "@/features/settings/chat-input-stt-models";
 import { estimateUsage } from "@/shared/db/idb";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -43,6 +56,11 @@ import {
   isBuiltinRouteId,
   listImageRoutes,
 } from "@/transport/image-routes";
+import {
+  MIMO_CHAT_TTS_ROUTE,
+  isRelativeTTSRoutePath,
+  ttsRouteVariables,
+} from "@/transport/tts-routes";
 import {
   authenticateWorker,
   clearWorkerAccessToken,
@@ -83,8 +101,16 @@ const SEARCH_PROVIDER_LABELS: Record<SearchProvider, string> = {
   serper: "Serper",
 };
 
+const VOICE_PROTOCOL_LABELS: Record<VoiceProtocol, string> = {
+  auto: "自动选择",
+  "grok-native": "grok2api 原生",
+  "openai-audio": "OpenAI Audio",
+};
+
 /** Radix Select 不允许空字符串作为选项值，用内部哨兵表示“尚未选择”。 */
-const NO_CHAT_INPUT_STT_MODEL = "__chatweb_no_chat_input_stt_model__";
+const NO_VOICE_MODEL = "__chatweb_no_voice_model__";
+const NO_VOICE_BACKEND = "__chatweb_no_voice_backend__";
+const BUILTIN_TTS_ROUTE = "__chatweb_builtin_tts_route__";
 
 /**
  * 模型页上的改动先攒在这里，点保存才落盘。
@@ -103,19 +129,36 @@ export type ModelDraft = {
   imageRouteOverrides: Record<string, string>;
 };
 
+/** 每个已添加后端的本地模型目录视图；读取它不会发起网络请求。 */
+export type BackendCatalogState = {
+  models: CatalogModel[];
+  fetchedAt: number | null;
+  stale: boolean;
+  available: boolean;
+};
+
 export function SettingsView({
-  backend, models, fetchedAt, stale, loading, error, onFetchModels, onPatch, onRemove, onAdd, draft, onDraftChange,
-  onDataCleared,
+  backend, backends, models, catalogsByBackendId, fetchedAt, stale, fetchingBackendId, fetchErrorsByBackendId,
+  fetchBlocked, loading, error, onFetchModels, onFetchBackendModels, onPatch, onPatchBackend, onRemove, onAdd,
+  draft, onDraftChange, onDataCleared,
 }: {
   backend: Backend;
+  backends: Backend[];
   models: CatalogModel[];
+  catalogsByBackendId: Record<string, BackendCatalogState>;
   /** 本地这份目录是什么时候拉的；null 表示还没拉过 */
   fetchedAt: number | null;
   stale: boolean;
+  fetchingBackendId: string | null;
+  fetchErrorsByBackendId: Record<string, string>;
+  /** 任一供应商正在拉目录时，先禁用其它获取按钮，避免同一个 mutation 的目标状态互相覆盖。 */
+  fetchBlocked: boolean;
   loading: boolean;
   error: string;
   onFetchModels: () => void;
+  onFetchBackendModels: (backendId: string) => void;
   onPatch: (changes: Partial<Backend>) => void;
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
   onRemove: () => void;
   onAdd: () => void;
   draft: ModelDraft | null;
@@ -142,7 +185,7 @@ export function SettingsView({
         </TabsContent>
         <TabsContent value="models" className="flex min-h-0 flex-1 flex-col">
           <ModelSection
-            backend={backend} models={models} loading={loading} error={error}
+            backend={backend} models={models} fetchBlocked={fetchBlocked} loading={loading} error={error}
             fetchedAt={fetchedAt} stale={stale} onFetchModels={onFetchModels} onPatch={onPatch}
             draft={draft} onDraftChange={onDraftChange}
           />
@@ -154,7 +197,16 @@ export function SettingsView({
           <RouteSection backend={backend} onPatch={onPatch} />
         </TabsContent>
         <TabsContent value="voice" className="min-h-0 flex-1 overflow-y-auto">
-          <VoiceSettingsSection backend={backend} models={models} onPatch={onPatch} />
+          <VoiceSettingsSection
+            backend={backend}
+            backends={backends}
+            catalogsByBackendId={catalogsByBackendId}
+            fetchingBackendId={fetchingBackendId}
+            fetchErrorsByBackendId={fetchErrorsByBackendId}
+            onFetchBackendModels={onFetchBackendModels}
+            onPatch={onPatch}
+            onPatchBackend={onPatchBackend}
+          />
         </TabsContent>
         <TabsContent value="behavior" className="min-h-0 flex-1 overflow-y-auto">
           <div className="flex flex-col gap-3">
@@ -446,10 +498,11 @@ function BackendSection({
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 
 function ModelSection({
-  backend, models, loading, error, fetchedAt, stale, onFetchModels, onPatch, draft, onDraftChange,
+  backend, models, fetchBlocked, loading, error, fetchedAt, stale, onFetchModels, onPatch, draft, onDraftChange,
 }: {
   backend: Backend;
   models: CatalogModel[];
+  fetchBlocked: boolean;
   loading: boolean;
   error: string;
   fetchedAt: number | null;
@@ -535,7 +588,7 @@ function ModelSection({
         </span>
         <Button
           variant="ghost" size="sm" className="ml-auto h-8 shrink-0 gap-1 px-2 text-xs"
-          onClick={onFetchModels} disabled={loading}
+          onClick={onFetchModels} disabled={fetchBlocked}
         >
           {loading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
           {models.length === 0 ? "获取模型" : "重新获取"}
@@ -881,16 +934,25 @@ function RouteSection({
 /* ── 语音 ─────────────────────────────────────────────────────────── */
 
 function VoiceSettingsSection({
-  backend, models, onPatch,
+  backend,
+  backends,
+  catalogsByBackendId,
+  fetchingBackendId,
+  fetchErrorsByBackendId,
+  onFetchBackendModels,
+  onPatch,
+  onPatchBackend,
 }: {
   backend: Backend;
-  models: CatalogModel[];
+  backends: Backend[];
+  catalogsByBackendId: Record<string, BackendCatalogState>;
+  fetchingBackendId: string | null;
+  fetchErrorsByBackendId: Record<string, string>;
+  onFetchBackendModels: (backendId: string) => void;
   onPatch: (changes: Partial<Backend>) => void;
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
 }) {
   const settings = useAppSettings();
-  const sttModels = listChatInputSTTModels(models);
-  const selectedSTTAvailable = sttModels.some((model) => model.id === backend.chatInputSTTModel);
-  const selectedSTTUnavailable = Boolean(backend.chatInputSTTModel) && !selectedSTTAvailable;
 
   return (
     <div className="flex flex-col gap-3">
@@ -924,65 +986,531 @@ function VoiceSettingsSection({
         />
       </section>
 
-      <section className="rounded-lg border p-4">
-        <div className="flex min-w-0 items-center gap-2">
-          <h2 className="shrink-0 text-sm font-medium">聊天转写模型</h2>
+      <VoiceRouteSettingsCard
+        kind="stt"
+        owner={backend}
+        backends={backends}
+        catalogsByBackendId={catalogsByBackendId}
+        fetchingBackendId={fetchingBackendId}
+        fetchErrorsByBackendId={fetchErrorsByBackendId}
+        onFetchBackendModels={onFetchBackendModels}
+        onPatch={onPatch}
+      />
+      <CustomTTSRouteSection
+        owner={backend}
+        backends={backends}
+        onPatchBackend={onPatchBackend}
+      />
+      <VoiceRouteSettingsCard
+        kind="tts"
+        owner={backend}
+        backends={backends}
+        catalogsByBackendId={catalogsByBackendId}
+        fetchingBackendId={fetchingBackendId}
+        fetchErrorsByBackendId={fetchErrorsByBackendId}
+        onFetchBackendModels={onFetchBackendModels}
+        onPatch={onPatch}
+      />
+    </div>
+  );
+}
+
+function CustomTTSRouteSection({
+  owner,
+  backends,
+  onPatchBackend,
+}: {
+  owner: Backend;
+  backends: Backend[];
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
+}) {
+  const configuredBackendId = owner.voiceRouting.tts.backendId?.trim() || owner.id;
+  const [backendId, setBackendId] = useState(configuredBackendId);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [draftError, setDraftError] = useState("");
+  const target = backends.find((item) => item.id === backendId);
+
+  useEffect(() => {
+    setBackendId(configuredBackendId);
+    setEditingId(null);
+    setDraftError("");
+  }, [configuredBackendId]);
+
+  function startEdit(route: CustomTTSRoute): void {
+    setEditingId(route.id);
+    setDraft(JSON.stringify(ttsRequestFormat(route), null, 2));
+    setDraftError("");
+  }
+
+  function addMiMoRoute(): void {
+    if (!target) {
+      toast.error("请先选择保存 TTS 路由的供应商");
+      return;
+    }
+    const created: CustomTTSRoute = {
+      ...MIMO_CHAT_TTS_ROUTE,
+      id: nextTTSRouteId(target.customTTSRoutes, MIMO_CHAT_TTS_ROUTE.id),
+      query: { ...MIMO_CHAT_TTS_ROUTE.query },
+      body: JSON.parse(JSON.stringify(MIMO_CHAT_TTS_ROUTE.body)) as Record<string, unknown>,
+      audioUrlPaths: [...MIMO_CHAT_TTS_ROUTE.audioUrlPaths],
+      audioBase64Paths: [...MIMO_CHAT_TTS_ROUTE.audioBase64Paths],
+    };
+    onPatchBackend(target.id, { customTTSRoutes: [...target.customTTSRoutes, created] });
+    startEdit(created);
+    toast.success("已创建 MiMo TTS 路由模板，请检查后保存");
+  }
+
+  function saveDraft(): void {
+    if (!target || !editingId) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(draft);
+    } catch (caught) {
+      setDraftError(caught instanceof Error ? caught.message : "JSON 格式不对");
+      return;
+    }
+    const result = customTTSRequestSchema.safeParse(parsed);
+    if (!result.success) {
+      setDraftError(result.error.issues.map((issue) => `${issue.path.join(".") || "根"}：${issue.message}`).join("\n"));
+      return;
+    }
+    if (!isRelativeTTSRoutePath(result.data.path)) {
+      setDraftError("path：只能填写相对于所选供应商 Base URL 的接口路径，不能填写完整网址");
+      return;
+    }
+    const currentRoute = target.customTTSRoutes.find((route) => route.id === editingId);
+    if (!currentRoute) {
+      setDraftError("这条路由已经不存在，请关闭编辑器后重新选择");
+      return;
+    }
+    onPatchBackend(target.id, {
+      customTTSRoutes: target.customTTSRoutes.map((route) => route.id === editingId
+        ? { ...route, ...result.data }
+        : route),
+    });
+    setEditingId(null);
+    setDraftError("");
+    toast.success("TTS 路由已保存");
+  }
+
+  function removeRoute(route: CustomTTSRoute): void {
+    if (!target) return;
+    const referencedBy = backends.filter((source) => {
+      const binding = source.voiceRouting.tts;
+      const bindingTargetId = binding.backendId?.trim() || source.id;
+      return bindingTargetId === target.id && binding.routeId === route.id;
+    });
+    if (referencedBy.length > 0) {
+      toast.error(`路由正在被 ${referencedBy.map((item) => item.name).join("、")} 的 TTS 设置使用，请先取消选择`);
+      return;
+    }
+    onPatchBackend(target.id, {
+      customTTSRoutes: target.customTTSRoutes.filter((item) => item.id !== route.id),
+    });
+    if (editingId === route.id) setEditingId(null);
+    toast.success("TTS 路由已删除");
+  }
+
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-medium">自定义 TTS 路由</h2>
+          <p className="mt-1 text-xs text-muted-foreground">路由保存在实际供应商上；创建和切换只修改本地配置，不会请求上游。</p>
+        </div>
+        <Button type="button" variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={addMiMoRoute} disabled={!target}>
+          <Plus className="size-3.5" />新建路由
+        </Button>
+      </div>
+
+      <div className="mt-3">
+        <Field label="路由所属供应商" hint="默认跟随上面 TTS 已选择的供应商，也可以在这里切换后管理其他供应商的路由。">
+          <Select
+            value={backendId}
+            onValueChange={(value) => { setBackendId(value); setEditingId(null); setDraftError(""); }}
+          >
+            <SelectTrigger aria-label="自定义 TTS 路由所属供应商" className="h-9 text-sm"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {backends.map((item) => <SelectItem key={item.id} value={item.id}>{backendOptionLabel(item)}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+      </div>
+
+      {!target ? (
+        <p className="mt-3 text-xs text-destructive">原供应商已删除，请重新选择。</p>
+      ) : target.customTTSRoutes.length === 0 ? (
+        <p className="mt-3 text-xs text-muted-foreground">还没有自定义 TTS 路由。使用小米 mimo-v2.5-tts 时，可直接创建上面的 MiMo 模板。</p>
+      ) : (
+        <div className="mt-3 flex flex-col gap-2">
+          {target.customTTSRoutes.map((route) => {
+            const variables = [...ttsRouteVariables(route)];
+            return (
+              <div key={route.id} className="rounded-md border">
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium">{route.name}</p>
+                    <p className="truncate font-mono text-[10px] text-muted-foreground">{route.method} {route.path}</p>
+                    <p className="truncate text-[10px] text-muted-foreground">参数：{variables.length > 0 ? variables.join(" · ") : "无模板变量"}</p>
+                  </div>
+                  <Button type="button" variant="ghost" size="icon" className="size-7 shrink-0" onClick={() => editingId === route.id ? setEditingId(null) : startEdit(route)} aria-label={`编辑 ${route.name}`}>
+                    <Pencil className="size-3.5" />
+                  </Button>
+                  <Button type="button" variant="ghost" size="icon" className="size-7 shrink-0" onClick={() => removeRoute(route)} aria-label={`删除 ${route.name}`}>
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </div>
+                {editingId === route.id ? (
+                  <div className="border-t p-3">
+                    <Textarea value={draft} onChange={(event) => { setDraft(event.target.value); setDraftError(""); }} rows={18} spellCheck={false} className="resize-y font-mono text-xs" aria-label={`${route.name} 的定义`} />
+                    {draftError ? <p className="mt-2 whitespace-pre-wrap text-xs text-destructive">{draftError}</p> : null}
+                    <div className="mt-2 flex gap-2">
+                      <Button type="button" size="sm" className="h-8 text-xs" onClick={saveDraft}>保存</Button>
+                      <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setEditingId(null)}>取消</Button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="mt-3 space-y-1 text-xs leading-5 text-muted-foreground">
+        <p>编辑器只保存请求格式：<code className="rounded bg-secondary px-1 py-0.5 font-mono">path</code>、<code className="rounded bg-secondary px-1 py-0.5 font-mono">method</code>、<code className="rounded bg-secondary px-1 py-0.5 font-mono">query</code> 和 <code className="rounded bg-secondary px-1 py-0.5 font-mono">body</code>。<code className="rounded bg-secondary px-1 py-0.5 font-mono">path</code> 只能填写相对于所选供应商 Base URL 的接口路径，例如 <code className="rounded bg-secondary px-1 py-0.5 font-mono">/chat/completions</code>。</p>
+        <p>可用模板变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model text voice format speed language</code>。</p>
+        <p>MiMo 的响应音频取值、音频格式和默认声线由模板固定，不需要在编辑器里填写。</p>
+      </div>
+    </section>
+  );
+}
+
+function ttsRequestFormat(route: CustomTTSRoute): Record<string, unknown> {
+  return {
+    path: route.path,
+    method: route.method,
+    query: route.query,
+    body: route.body,
+  };
+}
+
+export function nextTTSRouteId(routes: CustomTTSRoute[], preferred: string): string {
+  const ids = new Set(routes.map((route) => route.id));
+  if (!ids.has(preferred)) return preferred;
+  let suffix = 2;
+  while (ids.has(`${preferred}-${suffix}`)) suffix += 1;
+  return `${preferred}-${suffix}`;
+}
+
+export type VoiceRouteKind = "stt" | "tts";
+export type VoiceRouteDraft = {
+  backendId: string;
+  model: string;
+  protocol: VoiceProtocol;
+  routeId: string;
+};
+
+function VoiceRouteSettingsCard({
+  kind,
+  owner,
+  backends,
+  catalogsByBackendId,
+  fetchingBackendId,
+  fetchErrorsByBackendId,
+  onFetchBackendModels,
+  onPatch,
+}: {
+  kind: VoiceRouteKind;
+  owner: Backend;
+  backends: Backend[];
+  catalogsByBackendId: Record<string, BackendCatalogState>;
+  fetchingBackendId: string | null;
+  fetchErrorsByBackendId: Record<string, string>;
+  onFetchBackendModels: (backendId: string) => void;
+  onPatch: (changes: Partial<Backend>) => void;
+}) {
+  const initial = initialVoiceRoute(owner, backends, kind);
+  const initialKey = `${initial.backendId}\u0000${initial.model}\u0000${initial.protocol}\u0000${initial.routeId}`;
+  const [draft, setDraft] = useState<VoiceRouteDraft>(initial);
+
+  useEffect(() => { setDraft(initial); }, [initialKey]);
+
+  const target = backends.find((item) => item.id === draft.backendId);
+  const catalog = target ? catalogsByBackendId[target.id] : undefined;
+  const { recommended, others } = groupVoiceRouteModels(catalog?.models ?? [], kind);
+  const selectedMissing = Boolean(draft.model)
+    && !(catalog?.models ?? []).some((model) => model.id === draft.model);
+  const dirty = draft.backendId !== initial.backendId
+    || draft.model !== initial.model
+    || draft.protocol !== initial.protocol
+    || draft.routeId !== initial.routeId;
+  const fetching = Boolean(target && fetchingBackendId === target.id);
+  const resolvedProtocol = draft.protocol === "auto"
+    ? (target?.flavor === "grok2api" ? "grok-native" : "openai-audio")
+    : draft.protocol;
+  const customRoute = kind === "tts"
+    ? target?.customTTSRoutes.find((route) => route.id === draft.routeId)
+    : undefined;
+  const endpoint = customRoute?.path ?? (kind === "stt"
+    ? (resolvedProtocol === "grok-native" ? "/stt" : "/audio/transcriptions")
+    : (resolvedProtocol === "grok-native" ? "/tts" : "/audio/speech"));
+  const title = kind === "stt" ? "语音转写 STT" : "语音合成 TTS";
+
+  function save(): void {
+    if (!target) {
+      toast.error(`请先选择${title}供应商`);
+      return;
+    }
+    const model = draft.model.trim();
+    if (!model) {
+      toast.error(`请先选择${title}模型`);
+      return;
+    }
+    if (kind === "tts" && draft.routeId && !target.customTTSRoutes.some((route) => route.id === draft.routeId)) {
+      toast.error("选择的 TTS 请求路由已不存在，请重新选择");
+      return;
+    }
+    const binding: VoiceBinding = {
+      backendId: target.id === owner.id ? "" : target.id,
+      model,
+      protocol: draft.protocol,
+      routeId: kind === "tts" ? draft.routeId : "",
+    };
+    onPatch({
+      voiceRouting: {
+        ...owner.voiceRouting,
+        [kind]: binding,
+      },
+    });
+    toast.success(`${title}设置已保存`);
+  }
+
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="flex min-w-0 items-center gap-2">
+        <h2 className="shrink-0 text-sm font-medium">{title}</h2>
+        {target ? (
           <span
             className="ml-auto max-w-[55%] truncate rounded bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground"
-            title={backend.name}
+            title={target.baseURL}
           >
-            {backend.name}
+            {target.name}
           </span>
-        </div>
+        ) : null}
+      </div>
 
-        <div className="mt-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <Field label="供应商" hint="复用“后端”里已经保存的地址和密钥。切换这里只读本地缓存。">
           <Select
-            value={selectedSTTAvailable ? backend.chatInputSTTModel : NO_CHAT_INPUT_STT_MODEL}
-            onValueChange={(value) => onPatch({
-              chatInputSTTModel: value === NO_CHAT_INPUT_STT_MODEL ? "" : value,
-            })}
-            disabled={sttModels.length === 0}
+            value={draft.backendId || NO_VOICE_BACKEND}
+            onValueChange={(value) => setDraft(voiceRouteDraftForBackend(
+              value === NO_VOICE_BACKEND ? "" : value,
+            ))}
           >
-            <SelectTrigger aria-label="聊天语音输入的转写模型" className="h-9 min-w-0 flex-1 text-sm">
-              <SelectValue />
-            </SelectTrigger>
+            <SelectTrigger aria-label={`${title}供应商`} className="h-9 text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value={NO_CHAT_INPUT_STT_MODEL}>未选择</SelectItem>
-              {sttModels.map((model) => (
-                <SelectItem key={model.id} value={model.id}>
-                  {model.displayName && model.displayName !== model.id
-                    ? `${model.displayName} · ${model.id}`
-                    : model.id}
-                </SelectItem>
+              {!draft.backendId ? <SelectItem value={NO_VOICE_BACKEND}>请选择供应商</SelectItem> : null}
+              {draft.backendId && !target ? (
+                <SelectItem value={draft.backendId}>原供应商已删除</SelectItem>
+              ) : null}
+              {backends.map((item) => (
+                <SelectItem key={item.id} value={item.id}>{backendOptionLabel(item)}</SelectItem>
               ))}
             </SelectContent>
           </Select>
-          {selectedSTTUnavailable ? (
+        </Field>
+
+        <Field label="接口格式" hint={`当前会调用 ${endpoint}；自动模式按获取模型时识别到的后端类型选择。`}>
+          <Select
+            value={draft.protocol}
+            onValueChange={(value) => setDraft((current) => ({
+              ...current,
+              protocol: value as VoiceProtocol,
+            }))}
+          >
+            <SelectTrigger aria-label={`${title}接口格式`} className="h-9 text-sm"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {VOICE_PROTOCOLS.map((protocol) => (
+                <SelectItem key={protocol} value={protocol}>{VOICE_PROTOCOL_LABELS[protocol]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        {kind === "tts" ? (
+          <Field label="请求路由" hint="内置路由使用上面的接口格式；自定义路由可以改走 Chat Completions 等端点。">
+            <Select
+              value={draft.routeId || BUILTIN_TTS_ROUTE}
+              onValueChange={(value) => setDraft((current) => ({
+                ...current,
+                routeId: value === BUILTIN_TTS_ROUTE ? "" : value,
+              }))}
+              disabled={!target}
+            >
+              <SelectTrigger aria-label="语音合成 TTS 请求路由" className="h-9 text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={BUILTIN_TTS_ROUTE}>内置 · 按接口格式</SelectItem>
+                {draft.routeId && !customRoute ? (
+                  <SelectItem value={draft.routeId}>{draft.routeId} · 已失效</SelectItem>
+                ) : null}
+                {(target?.customTTSRoutes ?? []).map((route) => (
+                  <SelectItem key={route.id} value={route.id}>{route.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null}
+      </div>
+
+      <div className="mt-3">
+        <Field
+          label="模型"
+          hint={catalog?.available
+            ? `本地目录${catalog.fetchedAt ? `获取于 ${new Date(catalog.fetchedAt).toLocaleString()}` : "已读取"}${catalog.stale ? "，可能已过期" : ""}；推荐模型排在前面，其余模型仍可选择。`
+            : "尚未获取这个供应商的模型。切换供应商不会联网，只有点击右侧按钮才会请求。"}
+        >
+          <div className="flex min-w-0 gap-2">
+            <Select
+              value={draft.model || NO_VOICE_MODEL}
+              onValueChange={(value) => setDraft((current) => ({
+                ...current,
+                model: value === NO_VOICE_MODEL ? "" : value,
+              }))}
+              disabled={!target || (!catalog?.available && !draft.model)}
+            >
+              <SelectTrigger aria-label={`${title}模型`} className="h-9 min-w-0 flex-1 text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_VOICE_MODEL}>未选择</SelectItem>
+                {selectedMissing ? (
+                  <SelectItem value={draft.model}>{draft.model} · 不在当前目录</SelectItem>
+                ) : null}
+                {recommended.length > 0 ? (
+                  <SelectGroup>
+                    <SelectLabel>推荐的 {kind.toUpperCase()} 模型</SelectLabel>
+                    {recommended.map((model) => (
+                      <SelectItem key={model.id} value={model.id}>{catalogModelLabel(model)}</SelectItem>
+                    ))}
+                  </SelectGroup>
+                ) : null}
+                {recommended.length > 0 && others.length > 0 ? <SelectSeparator /> : null}
+                {others.length > 0 ? (
+                  <SelectGroup>
+                    <SelectLabel>全部其他模型</SelectLabel>
+                    {others.map((model) => (
+                      <SelectItem key={model.id} value={model.id}>{catalogModelLabel(model)}</SelectItem>
+                    ))}
+                  </SelectGroup>
+                ) : null}
+              </SelectContent>
+            </Select>
             <Button
+              type="button"
               variant="outline"
               size="sm"
-              className="h-9 self-start text-xs sm:shrink-0"
-              onClick={() => onPatch({ chatInputSTTModel: "" })}
+              className="h-9 shrink-0 gap-1.5 text-xs"
+              disabled={!target || fetchingBackendId !== null}
+              onClick={() => { if (target) onFetchBackendModels(target.id); }}
             >
-              清除旧选择
+              {fetching ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              {catalog?.available ? "重新获取" : "获取模型"}
             </Button>
-          ) : null}
-        </div>
+          </div>
+        </Field>
+      </div>
 
-        {selectedSTTUnavailable ? (
-          <p className="mt-2 break-words text-xs text-destructive">
-            此前选择的 <code className="break-all font-mono">{backend.chatInputSTTModel}</code> 已不可用：
-            它可能已取消保存、改了归类，或不在当前模型目录中。请重新选择或清除。
-          </p>
-        ) : (
-          <p className="mt-2 text-xs text-muted-foreground">
-            聊天录音结束后用这个模型转成文字。这里只列出「模型」页里已保存且归类为语音转写的模型；
-            {sttModels.length === 0 ? "目前没有候选，请先去模型页保存一个语音转写模型。" : "未选择时聊天麦克风不会开始转写。"}
-          </p>
-        )}
-      </section>
-    </div>
+      {target?.mode === "proxy" ? (
+        <p className="mt-2 text-xs text-destructive">当前语音引用暂不支持 proxy 后端，请选择 direct 后端。</p>
+      ) : null}
+      {target && fetchErrorsByBackendId[target.id] ? (
+        <p className="mt-2 whitespace-pre-wrap text-xs text-destructive">{fetchErrorsByBackendId[target.id]}</p>
+      ) : null}
+      {catalog?.available && catalog.models.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">这个供应商的模型目录为空。</p>
+      ) : null}
+
+      <div className="mt-3 flex gap-2">
+        <Button size="sm" className="h-8 text-xs" disabled={!dirty || !target || !draft.model.trim()} onClick={save}>保存</Button>
+        {dirty ? (
+          <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setDraft(initial)}>还原</Button>
+        ) : null}
+      </div>
+
+      <p className="mt-3 text-xs leading-5 text-muted-foreground">
+        {kind === "stt" ? "聊天麦克风和语音页的转写" : "语音页的语音合成"}
+        会使用这里选择的供应商和模型，不会切换顶部当前聊天后端。
+      </p>
+    </section>
   );
+}
+
+/**
+ * 切换供应商只改本地草稿：清掉上一家的模型，并回到自动协议。
+ * 这个 helper 不接收任何请求函数，避免下拉框变化时误触发模型拉取。
+ */
+export function voiceRouteDraftForBackend(backendId: string): VoiceRouteDraft {
+  return { backendId, model: "", protocol: "auto", routeId: "" };
+}
+
+/** 归类只决定推荐顺序；目录里的其余模型（包括 hidden）仍允许用户自行选择。 */
+export function groupVoiceRouteModels(
+  models: CatalogModel[],
+  kind: VoiceRouteKind,
+): { recommended: CatalogModel[]; others: CatalogModel[] } {
+  const recommended = models.filter((model) => model.kind === kind);
+  const recommendedIds = new Set(recommended.map((model) => model.id));
+  return {
+    recommended,
+    others: models.filter((model) => !recommendedIds.has(model.id)),
+  };
+}
+
+export function initialVoiceRoute(owner: Backend, backends: Backend[], kind: VoiceRouteKind): VoiceRouteDraft {
+  const binding = owner.voiceRouting[kind];
+  if (binding.model.trim()) {
+    return {
+      backendId: binding.backendId.trim() || owner.id,
+      model: binding.model.trim(),
+      protocol: binding.protocol,
+      routeId: kind === "tts" ? (binding.routeId ?? "").trim() : "",
+    };
+  }
+
+  if (kind === "stt" && owner.sttProvider.type === "openai-compatible") {
+    const legacyBaseURL = normalizeBaseURL(owner.sttProvider.baseURL);
+    const matched = backends.find((item) => (
+      normalizeBaseURL(item.baseURL) === legacyBaseURL
+      && item.apiKey === owner.sttProvider.apiKey
+    ));
+    return {
+      backendId: matched?.id ?? "",
+      model: owner.sttProvider.model.trim(),
+      protocol: "openai-audio",
+      routeId: "",
+    };
+  }
+
+  return {
+    backendId: owner.id,
+    model: kind === "stt" ? owner.chatInputSTTModel.trim() : "",
+    // 旧版 chatInputSTTModel 明确对应当前后端的 /stt；没有旧配置时让方言决定端点。
+    protocol: kind === "stt" && owner.chatInputSTTModel.trim() ? "grok-native" : "auto",
+    routeId: "",
+  };
+}
+
+function backendOptionLabel(backend: Backend): string {
+  try {
+    return `${backend.name} · ${new URL(backend.baseURL).host}`;
+  } catch {
+    return backend.name;
+  }
+}
+
+function catalogModelLabel(model: CatalogModel): string {
+  return model.displayName && model.displayName !== model.id
+    ? `${model.displayName} · ${model.id}`
+    : model.id;
 }
 
 /* ── 行为 ─────────────────────────────────────────────────────────── */

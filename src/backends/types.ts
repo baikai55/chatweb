@@ -5,9 +5,9 @@ export const CAPABILITIES = ["chat", "image", "video", "tts", "stt"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 /**
- * 后端方言。用响应头确定性识别，不靠猜：
- *   CPA      → X-CPA-Version（在它的 Access-Control-Expose-Headers 白名单里，浏览器读得到）
- *   grok2api → X-Request-ID + /v1/tts 存在
+ * 后端方言。只保留能由响应头确定性识别的结果：
+ *   CPA → X-CPA-Version（在它的 Access-Control-Expose-Headers 白名单里，浏览器读得到）
+ * X-Request-ID 是 OpenAI 兼容接口的通用头，不能单独证明后端是 grok2api。
  */
 export const BACKEND_FLAVORS = ["cpa", "grok2api", "generic"] as const;
 export type BackendFlavor = (typeof BACKEND_FLAVORS)[number];
@@ -17,6 +17,49 @@ export type ChatProtocol = (typeof CHAT_PROTOCOLS)[number];
 
 export const BACKEND_MODES = ["direct", "proxy"] as const;
 export type BackendMode = (typeof BACKEND_MODES)[number];
+
+/**
+ * 语音转写使用当前后端的原生 `/stt`，或绕过当前后端直连独立的
+ * OpenAI-compatible `/audio/transcriptions` 服务。
+ */
+export const STT_PROVIDER_TYPES = ["backend-native", "openai-compatible"] as const;
+export type STTProviderType = (typeof STT_PROVIDER_TYPES)[number];
+
+export const sttProviderSchema = z.object({
+  type: z.enum(STT_PROVIDER_TYPES).default("backend-native"),
+  /** 独立供应商的 API 前缀；使用时才规范化并补 `/v1`。 */
+  baseURL: z.string().default(""),
+  apiKey: z.string().default(""),
+  model: z.string().default(""),
+});
+
+export type STTProvider = z.infer<typeof sttProviderSchema>;
+
+/** 语音端点协议。auto 会按目标后端已识别的方言选择，必要时可手动覆盖。 */
+export const VOICE_PROTOCOLS = ["auto", "grok-native", "openai-audio"] as const;
+export type VoiceProtocol = (typeof VOICE_PROTOCOLS)[number];
+
+/**
+ * 语音服务绑定到已经添加的后端，只保存 id，不复制地址和密钥。
+ * 空 backendId 表示当前聊天后端；model 为空时由旧配置/面板默认值回退。
+ */
+export const voiceBindingSchema = z.object({
+  backendId: z.string().default(""),
+  model: z.string().default(""),
+  protocol: z.enum(VOICE_PROTOCOLS).default("auto"),
+  /** TTS 自定义路由 id；为空时继续按 protocol 使用内置端点。 */
+  // 外层 optional 保持旧对象字面量的源码兼容；解析时仍会用 default 补成空串。
+  routeId: z.string().default("").optional(),
+});
+
+export type VoiceBinding = z.infer<typeof voiceBindingSchema>;
+
+export const voiceRoutingSchema = z.object({
+  stt: voiceBindingSchema.default({ backendId: "", model: "", protocol: "auto", routeId: "" }),
+  tts: voiceBindingSchema.default({ backendId: "", model: "", protocol: "auto", routeId: "" }),
+});
+
+export type VoiceRouting = z.infer<typeof voiceRoutingSchema>;
 
 /** 模型在 UI 里被归到哪个面板。auto 表示用启发式推断的结果。 */
 export const MODEL_KINDS = ["auto", "chat", "image", "video", "tts", "stt", "hidden"] as const;
@@ -63,6 +106,46 @@ export const customImageRouteSchema = z.object({
 
 export type CustomImageRoute = z.infer<typeof customImageRouteSchema>;
 
+/**
+ * 自定义 TTS 路由。
+ *
+ * body / query 使用与图片自定义路由相同的 `$变量` 模板；响应既可以返回音频 URL，
+ * 也可以把音频放在 JSON 的 base64 字段中。点号路径支持 `*` 展开数组。
+ */
+export const customTTSRouteSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /** 相对目标后端 baseURL 的路径；设置页和传输层会拒绝完整 URL。 */
+  path: z.string().min(1),
+  method: z.enum(["POST", "GET"]).default("POST"),
+  query: z.record(z.string(), z.string()).default({}),
+  body: z.record(z.string(), z.unknown()).default({}),
+  /** JSON 响应内可能包含音频 URL 的点号路径。 */
+  audioUrlPaths: z.array(z.string()).default([]),
+  /** JSON 响应内可能包含纯 base64 或 data URL 的点号路径。 */
+  audioBase64Paths: z.array(z.string()).default([]),
+  /** base64 响应没有携带类型信息时用于创建 Blob。 */
+  mimeType: z.string().min(1).default("audio/mpeg"),
+  /** 选择该路由时使用的默认声线；为空时由内置协议决定。 */
+  defaultVoice: z.string().default(""),
+});
+
+export type CustomTTSRoute = z.infer<typeof customTTSRouteSchema>;
+
+/**
+ * 设置页给用户编辑的 TTS 请求格式。
+ * 路由元数据和响应音频解析规则由内置模板维护，不随请求格式暴露或修改。
+ */
+export const customTTSRequestSchema = z.object({
+  /** 相对目标后端 baseURL 的路径；不能填写完整 URL。 */
+  path: z.string().min(1),
+  method: z.enum(["POST", "GET"]).default("POST"),
+  query: z.record(z.string(), z.string()).default({}),
+  body: z.record(z.string(), z.unknown()).default({}),
+}).strict();
+
+export type CustomTTSRequest = z.infer<typeof customTTSRequestSchema>;
+
 export const backendSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -76,6 +159,19 @@ export const backendSchema = z.object({
   chatProtocol: z.enum(CHAT_PROTOCOLS).default("chat-completions"),
   /** 聊天输入框录音完成后用于转写的 STT 模型；空字符串表示尚未选择。 */
   chatInputSTTModel: z.string().default(""),
+  /** STT 可以沿用当前后端，也可以独立直连另一家 OpenAI-compatible 服务。 */
+  /** @deprecated 仅为兼容上一版独立 URL/Key 配置；新设置使用 voiceRouting 引用已有后端。 */
+  sttProvider: sttProviderSchema.default({
+    type: "backend-native",
+    baseURL: "",
+    apiKey: "",
+    model: "",
+  }),
+  /** STT/TTS 各自引用一个已添加的后端。 */
+  voiceRouting: voiceRoutingSchema.default({
+    stt: { backendId: "", model: "", protocol: "auto", routeId: "" },
+    tts: { backendId: "", model: "", protocol: "auto", routeId: "" },
+  }),
   /**
    * 决定侧边栏显示哪几个面板，用户自己勾。
    *
@@ -103,6 +199,8 @@ export const backendSchema = z.object({
   imageRouteOverrides: z.record(z.string(), z.string()).default({}),
   /** 没有单独指定路由的图片模型默认走哪条 */
   defaultImageRoute: z.string().default("images"),
+  /** 用户定义的 TTS 请求/响应路由；由 voiceRouting.tts.routeId 引用。 */
+  customTTSRoutes: z.array(customTTSRouteSchema).default([]),
 });
 
 export type Backend = z.infer<typeof backendSchema>;
@@ -140,6 +238,16 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     flavor: input.flavor ?? "generic",
     chatProtocol: input.chatProtocol ?? "chat-completions",
     chatInputSTTModel: input.chatInputSTTModel ?? "",
+    sttProvider: input.sttProvider ?? {
+      type: "backend-native",
+      baseURL: "",
+      apiKey: "",
+      model: "",
+    },
+    voiceRouting: input.voiceRouting ?? {
+      stt: { backendId: "", model: "", protocol: "auto", routeId: "" },
+      tts: { backendId: "", model: "", protocol: "auto", routeId: "" },
+    },
     capabilities: input.capabilities ?? [],
     modelOverrides: input.modelOverrides ?? {},
     webSearchModeOverrides: input.webSearchModeOverrides ?? {},
@@ -147,5 +255,6 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     customImageRoutes: input.customImageRoutes ?? [],
     imageRouteOverrides: input.imageRouteOverrides ?? {},
     defaultImageRoute: input.defaultImageRoute ?? "images",
+    customTTSRoutes: input.customTTSRoutes ?? [],
   });
 }

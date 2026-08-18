@@ -111,10 +111,10 @@ function annotate(status: number, message: string, rawBody: string): string {
     return `${message}\n\n这个上游只认 type=function 的工具，用不了内置的联网搜索。去设置页的「模型」把这个模型的联网方式改成「函数」，再发一次；也可以暂时关闭工具栏里的「联网」。Gemini 和 Grok 的模型不受影响（实测 CPA 上的 Grok 可以正常搜）。`;
   }
   if (status === 401) {
-    return `${message}\n\nkey 没通过验证。检查设置里的 API Key 是否正确，以及后端是否已经重载了新加的 key。`;
+    return `${message}\n\n密钥没有通过验证。请检查当前功能实际使用的供应商和 API Key；如果刚在服务端换过密钥，还要确认配置已经重载。`;
   }
   if (status === 404) {
-    return `${message}\n\n这个后端没有这个端点 —— 不是每个后端都有全套端点（实测 CPA 的 /tts、/stt 就全是 404）。用不了的面板可以去设置页的「显示哪些面板」里取消勾选。`;
+    return `${message}\n\n这个地址没有对应端点。请检查 API 前缀和所选协议；不同供应商支持的接口并不相同。用不了的面板可以去设置页的「显示哪些面板」里取消勾选。`;
   }
   if (status === 429) {
     return `${message}\n\n上游限流了，等一会儿再试。`;

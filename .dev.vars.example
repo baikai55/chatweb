@@ -13,7 +13,7 @@ ACCESS_PASSWORD=""
 # 签发 token 用的 HMAC 密钥。随便一串长随机字符，例如 `openssl rand -hex 32`。
 TOKEN_SECRET=""
 
-# 联网搜索。auto 会优先使用已配置的付费搜索，再依次尝试免费服务。
+# 联网搜索。auto 有 key 时先用 Tavily/Serper，再尝试 Exa、Bing RSS、SearXNG、DuckDuckGo。
 # 可选值：auto、exa、bing-rss、duckduckgo、searxng、tavily、serper
 SEARCH_PROVIDER="auto"
 

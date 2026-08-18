@@ -1,6 +1,6 @@
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -9,18 +9,24 @@ import { Input } from "@/components/ui/input";
 import {
   applyBackendConfig,
   isCatalogStale,
+  modelCatalogQueryKey,
   modelsForKind,
   readModelCatalog,
   refreshModelCatalog,
   savedModelsOnly,
 } from "@/backends/model-catalog";
 import { useBackends } from "@/backends/use-backends";
+import { getBackendReferences } from "@/backends/backend-store";
 import { createBackend, normalizeBaseURL, type Backend } from "@/backends/types";
 import { AppShell, type ConsoleMode } from "@/app/app-shell";
 import { ChatPanel } from "@/features/console/chat-panel";
 import { useChatSessions } from "@/features/console/use-chat-sessions";
 import { ImagePanel } from "@/features/image/image-panel";
-import { SettingsView, type ModelDraft } from "@/features/settings/settings-view";
+import {
+  SettingsView,
+  type BackendCatalogState,
+  type ModelDraft,
+} from "@/features/settings/settings-view";
 import { VideoPanel } from "@/features/video/video-panel";
 import { VoicePanel } from "@/features/voice/voice-panel";
 
@@ -38,6 +44,16 @@ export function App() {
   }
   if (!active) return null;
 
+  function removeActiveBackend(): void {
+    if (!active) return;
+    const referencedBy = getBackendReferences(active.id);
+    if (referencedBy.length > 0) {
+      toast.error(`这个后端正在被 ${referencedBy.map((item) => item.name).join("、")} 的语音设置使用，请先更换 STT/TTS 供应商`);
+      return;
+    }
+    remove(active.id);
+  }
+
   return (
     <Console
       key={active.id}
@@ -45,7 +61,8 @@ export function App() {
       backends={backends}
       onActivate={activate}
       onPatch={(changes) => patch(active.id, changes)}
-      onRemove={() => remove(active.id)}
+      onPatchBackend={patch}
+      onRemove={removeActiveBackend}
       onAdd={() => setAdding(true)}
     />
   );
@@ -60,6 +77,7 @@ function Console({
   backends,
   onActivate,
   onPatch,
+  onPatchBackend,
   onRemove,
   onAdd,
 }: {
@@ -67,6 +85,7 @@ function Console({
   backends: Backend[];
   onActivate: (id: string) => void;
   onPatch: (changes: Partial<Backend>) => void;
+  onPatchBackend: (id: string, changes: Partial<Backend>) => void;
   onRemove: () => void;
   onAdd: () => void;
 }) {
@@ -79,6 +98,8 @@ function Console({
   const [modelDraft, setModelDraft] = useState<ModelDraft | null>(null);
   /** 「删除全部记录」之后 +1，让聊天历史重读一遍。 */
   const [historyToken, setHistoryToken] = useState(0);
+  const [fetchErrors, setFetchErrors] = useState<Record<string, string>>({});
+  const queryClient = useQueryClient();
 
   /**
    * 只读本地缓存，**不打网络**。拉取由用户点「获取模型」触发。
@@ -87,31 +108,58 @@ function Console({
    * 放进 key 会让每勾一下都变成一次新查询 —— 设置页列表会整段闪一下并滚回顶部。
    * 标注在下面用 applyBackendConfig 重算。
    */
-  const catalog = useQuery({
-    queryKey: ["models", backend.id, backend.baseURL],
-    queryFn: () => readModelCatalog(backend),
-    retry: false,
+  const catalogQueries = useQueries({
+    queries: backends.map((target) => ({
+      queryKey: modelCatalogQueryKey(target),
+      queryFn: () => readModelCatalog(target),
+      retry: false,
+    })),
   });
+
+  const catalogsByBackendId: Record<string, BackendCatalogState> = {};
+  backends.forEach((target, index) => {
+    const data = catalogQueries[index]?.data ?? null;
+    catalogsByBackendId[target.id] = {
+      models: applyBackendConfig(data?.models ?? [], target),
+      fetchedAt: data?.fetchedAt ?? null,
+      stale: data ? isCatalogStale(data.fetchedAt) : false,
+      available: data !== null,
+    };
+  });
+  const activeCatalog = catalogsByBackendId[backend.id] ?? {
+    models: [], fetchedAt: null, stale: false, available: false,
+  };
 
   const fetchModels = useMutation({
-    mutationFn: () => refreshModelCatalog(backend),
-    onSuccess: (result) => {
-      catalog.refetch();
-      // 方言是拉模型时白捡的（读 /models 的响应头），顺手存下来
-      if (result.flavor !== backend.flavor) onPatch({ flavor: result.flavor });
-      toast.success(`拉到 ${result.models.length} 个模型`);
+    mutationFn: async (backendId: string) => {
+      const target = backends.find((item) => item.id === backendId);
+      if (!target) throw new Error("这个后端已不存在，请重新选择供应商");
+      return { target, result: await refreshModelCatalog(target) };
     },
-    onError: (caught) => toast.error(caught instanceof Error ? caught.message : String(caught)),
+    onMutate: (backendId) => {
+      setFetchErrors((current) => {
+        const next = { ...current };
+        delete next[backendId];
+        return next;
+      });
+    },
+    onSuccess: ({ target, result }) => {
+      queryClient.setQueryData(modelCatalogQueryKey(target), result);
+      // 方言是拉模型时白捡的（读 /models 的响应头），顺手存下来
+      if (result.flavor !== target.flavor) onPatchBackend(target.id, { flavor: result.flavor });
+      toast.success(`${target.name}：拉到 ${result.models.length} 个模型`);
+    },
+    onError: (caught, backendId) => {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setFetchErrors((current) => ({ ...current, [backendId]: message }));
+      toast.error(message);
+    },
   });
 
-  const decorated = useMemo(
-    () => applyBackendConfig(catalog.data?.models ?? [], backend),
-    [catalog.data, backend],
-  );
+  const decorated = activeCatalog.models;
 
   const saved = savedModelsOnly(decorated);
   const chatModels = modelsForKind(saved, "chat");
-  const sttModels = saved.filter((model) => model.kind === "stt");
   const chat = useChatSessions(backend.id, chatModels[0]?.id ?? "", historyToken);
 
   return (
@@ -133,13 +181,20 @@ function Console({
       {settingsOpen ? (
         <SettingsView
           backend={backend}
+          backends={backends}
           models={decorated}
-          fetchedAt={catalog.data?.fetchedAt ?? null}
-          stale={catalog.data ? isCatalogStale(catalog.data.fetchedAt) : false}
-          loading={fetchModels.isPending}
-          error={fetchModels.isError ? (fetchModels.error instanceof Error ? fetchModels.error.message : String(fetchModels.error)) : ""}
-          onFetchModels={() => fetchModels.mutate()}
+          catalogsByBackendId={catalogsByBackendId}
+          fetchedAt={activeCatalog.fetchedAt}
+          stale={activeCatalog.stale}
+          fetchingBackendId={fetchModels.isPending ? fetchModels.variables ?? null : null}
+          fetchErrorsByBackendId={fetchErrors}
+          fetchBlocked={fetchModels.isPending}
+          loading={fetchModels.isPending && fetchModels.variables === backend.id}
+          error={fetchErrors[backend.id] ?? ""}
+          onFetchModels={() => fetchModels.mutate(backend.id)}
+          onFetchBackendModels={(backendId) => fetchModels.mutate(backendId)}
           onPatch={onPatch}
+          onPatchBackend={onPatchBackend}
           onRemove={onRemove}
           onAdd={onAdd}
           draft={modelDraft}
@@ -149,8 +204,8 @@ function Console({
       ) : mode === "chat" ? (
         <ChatPanel
           backend={backend}
+          backends={backends}
           models={chatModels}
-          sttModels={sttModels}
           session={chat.current}
           onCommit={chat.commit}
           onManage={() => setSettingsOpen(true)}
@@ -171,6 +226,8 @@ function Console({
       ) : (
         <VoicePanel
           backend={backend}
+          backends={backends}
+          catalogsByBackendId={catalogsByBackendId}
           models={saved}
           onManage={() => setSettingsOpen(true)}
         />

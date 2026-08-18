@@ -107,6 +107,17 @@ export function removeBackend(id: string): BackendState {
   });
 }
 
+/** 返回会因删除目标后端而产生悬空语音绑定的其它后端。 */
+export function getBackendReferences(id: string): Backend[] {
+  return loadBackendState().backends.filter((source) => {
+    if (source.id === id) return false;
+    return ([source.voiceRouting.stt, source.voiceRouting.tts] as const).some((binding) => {
+      const targetId = binding.backendId.trim() || source.id;
+      return targetId === id;
+    });
+  });
+}
+
 export function patchBackend(id: string, patch: Partial<Backend>): BackendState {
   const state = loadBackendState();
   const target = state.backends.find((backend) => backend.id === id);
@@ -118,7 +129,13 @@ export function patchBackend(id: string, patch: Partial<Backend>): BackendState 
 export function exportBackends(options: { includeKeys: boolean }): string {
   const state = loadBackendState();
   const backends = state.backends.map((backend) =>
-    options.includeKeys ? backend : { ...backend, apiKey: "" },
+    options.includeKeys
+      ? backend
+      : {
+        ...backend,
+        apiKey: "",
+        sttProvider: { ...backend.sttProvider, apiKey: "" },
+      },
   );
   return JSON.stringify({ ...state, backends }, null, 2);
 }

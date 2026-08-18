@@ -1,7 +1,9 @@
 # 交接说明
 
-给下一个接手的会话看的。项目背景和设计取舍看 `README.md`，完整方案看
-`C:\Users\99037\.claude\plans\unified-whistling-fox.md`。这里只写「现在到哪了、接下来做什么」。
+给下一个接手会话看的。项目背景、使用和部署方式看 `README.md`。本文件顶部的
+「已完成且验证过」「最近完成」和「当前仍需验证」是当前事实来源；后半部分保留的是
+按时间追加的历史记录，若旧描述与顶部或代码冲突，以顶部和代码为准。本机的
+`C:\Users\99037\.claude\plans\unified-whistling-fox.md` 只是历史资料，不是仓库依赖。
 
 ## 已完成且验证过
 
@@ -10,10 +12,10 @@
 | 模块 | 文件 | 状态 |
 |---|---|---|
 | SSE 解析 | `src/transport/sse.ts` | ✅ 含 90s 静默超时、8MB 缓冲上限 |
-| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 原生/函数联网、工具循环、多模态请求体有单测；待真后端 |
+| chat/completions 适配 | `src/transport/chat-completions.ts` | ✅ 原生搜索有真实上游证据；函数工具循环和多模态请求体有单测，DeepSeek + Exa 完整循环待最终复核 |
 | 错误解析 | `src/transport/errors.ts` | ✅ 兼容四种错误体形状；费解的报错补人话，有单测 |
-| 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod |
-| 模型目录 | `src/backends/model-catalog.ts` | ✅ 88 个真实模型回归验证过；含方言识别 |
+| 后端配置存储 | `src/backends/backend-store.ts` | ✅ localStorage + zod；语音路由引用已有后端并可引用自定义 TTS 路由，旧 `sttProvider` 保留兼容 |
+| 模型目录 | `src/backends/model-catalog.ts` | ✅ IndexedDB 只读与手动刷新分离；曾用 88 个线上模型 ID 回归（CPA 68 + grok2api 20，当时快照） |
 | IndexedDB | `src/shared/db/idb.ts` | ✅ 手写封装，无第三方依赖；v2 加了 generations |
 | 会话存储 | `src/features/console/chat-store.ts` | ✅ 已从 localStorage 迁到 IndexedDB |
 | 生成记录 | `src/features/history/generation-store.ts` | ✅ 图片/视频/语音共用，每后端每面板 50 条；列表 portal 到侧栏 |
@@ -22,10 +24,11 @@
 | 模型选择器 | `src/features/console/model-picker.tsx` | ✅ 搜索 + 分组 |
 | 侧栏 + 四模式 | `src/app/app-shell.tsx` | ✅ 按手勾的面板显隐、移动端抽屉 |
 | 会话状态 | `src/features/console/use-chat-sessions.ts` | ✅ 侧栏历史与聊天面板共享 |
-| 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 参数控制、URL/Base64、流式兼容、预览与下载 |
+| 生图面板 | `src/features/image/image-panel.tsx`、`src/transport/images.ts` | ✅ 自适应尺寸、URL/Base64、流式兼容、全屏缩放查看与下载 |
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
-| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT、麦克风录音、声线、播放下载与转写；不再按方言拦人 |
-| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类/联网方式覆盖、图片路由、联网源、独立语音设置、行为设置、删除全部记录 |
+| 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT 可跨后端，支持 Grok 原生/OpenAI Audio/自定义 TTS 路由；声线仅手动加载 |
+| 语音路由 | `src/transport/voice-routing.ts`、`src/transport/tts-routes.ts` | ✅ STT/TTS 各自引用已有后端；支持 MiMo Chat TTS 模板、自动协议、旧配置回退、失效路由与 proxy 错误 |
+| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类/联网方式覆盖、图片/TTS 路由、联网源、STT/TTS 供应商与模型、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
 | 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知、图片等待上限、函数搜索源 |
 | Worker | `worker/*.ts` | ✅ R2 上传、搜索聚合/鉴权/响应上限、路径穿越、CSP |
@@ -33,17 +36,48 @@
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
 同时修正了聊天默认模型候选：聊天会话只使用已保存的 chat 模型，不会误选图片或视频模型。
 
-## 本轮（混合联网搜索与 function tool）
+## 最近完成（自定义 TTS 路由与 MiMo Chat TTS）
+
+- `Backend.customTTSRoutes` 保存供应商自己的 TTS 请求/响应模板；`voiceRouting.tts.routeId` 引用路由。旧配置解析时自动补空数组和空 route id。
+- 「设置 → 语音」可选择实际供应商，一键创建 MiMo 模板、编辑 JSON、校验和删除。路由 id 保存后禁止修改；仍被任一后端的 TTS 配置引用时禁止删除。
+- TTS 卡片新增“请求路由”：留空使用 `auto` / `grok-native` / `openai-audio` 内置端点；选择自定义路由后优先按模板请求，路由丢失时明确不可用，不静默回退 `/audio/speech`。
+- `MIMO_CHAT_TTS_ROUTE` 调用 `POST /chat/completions`，发送 `assistant` 文本与 `audio.voice/format`；默认 `mimo_default` + WAV，兼容 `choices.*.message.audio.data`、`audio.data`、顶层 `data`。
+- 模板变量为 `model/text/voice/format/speed/language`。语音页只显示模板实际使用的参数；MiMo 因此显示声线和格式，不显示语言、语速。
+- 推荐组合：硅基流动 `FunAudioLLM/SenseVoiceSmall`（备用 `TeleAI/TeleSpeechASR`）走 `openai-audio` 的 `/audio/transcriptions`；小米 `mimo-v2.5-tts` 走上述 MiMo Chat 自定义路由。
+- 模型和声线仍严格手动获取：打开设置、切换供应商、选择路由都不会主动请求上游。
+
+本轮验证：`pnpm check`、`pnpm test`（27 个文件、244/244）、`pnpm build`、`git diff --check` 均通过；未向真实语音供应商发请求。Vite 仅保留主包超过 500 KB 的体积提示。
+
+## 最近完成（STT/TTS 复用后端与手动获取模型）
+
+- `Backend.voiceRouting` 为 STT、TTS 分别保存 `{ backendId, model, protocol, routeId? }`。空 `backendId` 表示当前后端；新配置只引用「后端」里已有的地址和 API key，不再复制敏感字段。两条路由可以引用不同供应商。
+- 「设置 → 语音」现在有独立的 STT/TTS 卡片。所有后端的模型目录只通过 `readModelCatalog()` 从 IndexedDB 读取；切换供应商只更新本地草稿并清空上一家的模型选择，只有用户点击「获取模型/重新获取」才对指定后端调用 `refreshModelCatalog()`。模型分类只决定推荐排序，目录中的其他模型仍可选。
+- 聊天麦克风与语音页 STT 共用 STT 路由，语音页 TTS 使用 TTS 路由；历史记录保存实际请求供应商的 backend id、名称和协议。
+- MiMo 自定义路由编辑器只暴露请求格式 `path/method/query/body`；供应商 URL/Key 来自后端绑定，响应取值、MIME、默认声线和路由元数据由内置模板维护。`path` 必须是相对于供应商 Base URL 的路径，完整 URL 会在保存和请求前被拒绝。
+- 协议支持 `auto`、`grok-native`、`openai-audio`。`auto` 将 grok2api 解析为原生 `/stt`、`/tts`，其他方言解析为 OpenAI `/audio/transcriptions`、`/audio/speech`；用户可手动覆盖。OpenAI TTS 使用 `model/input/voice/response_format`，OpenAI STT 不发送 Grok 专用的 `format`。
+- `/tts/voices` 不再自动请求：Grok 原生模式只有点击「加载声线」才联网；OpenAI Audio 没有通用声线目录，完全不探测未知端点，voice ID 可手填且默认 `alloy`。
+- `mode:"proxy"` 的语音引用当前明确不可用，因为前端语音链路尚未接入 Worker 代理。上一版的 `sttProvider` 和 `chatInputSTTModel` 仍保留回退：旧独立 STT 能匹配已有 URL+Key 时复用后端，匹配不到仍沿用旧地址直连；新 `voiceRouting` 一旦保存即优先。
+
+本轮验证：`pnpm check`、`pnpm test`（26 个文件、221/221）、`pnpm build`、`git diff --check` 均通过；没有向真实供应商发请求。真后端与浏览器麦克风仍见下方待验证项。
+
+## 最近完成（生图查看与自适应尺寸，`1a3593c`）
+
+- 生图固定尺寸默认值从 `1024x1024` 改为 `auto`，仍可选择固定尺寸或宽高比；请求模板会原样发送 `size:"auto"`。
+- 点击结果图进入全屏查看器，支持 1x–5x 缩放、按钮/滚轮/双击/双指操作、拖动、键盘 `+`/`-`/`0`/方向键/`Escape`、焦点锁定和关闭后还焦。
+- 缩放和平移约束抽到 `image-viewer-transform.ts`；新增 1 个测试文件、8 个用例。全套因此增至 20 个测试文件、184 个用例。
+
+## 最近完成（混合联网搜索与 function tool，`da2df55`）
 
 - 每个已保存的聊天模型在「模型」设置中独立选择「自动 / 原生 / 函数」。自动路由 Gemini 到 `google_search`、Grok 到原生 `web_search`，其他模型走标准 `type:"function"` 的 `web_search`；手动选择会覆盖自动路由。
 - 函数路径在 `src/transport/chat-completions.ts` 内维护 `assistant.tool_calls -> /__api/search -> role:tool` 循环，按流式 `index` 拼接参数；每个用户问题最多处理两次搜索调用，重复查询复用结果，搜索失败也回填为工具结果；中间工具消息不写入 IndexedDB 历史。
-- `worker/search.ts` 支持 Exa、Bing RSS、DuckDuckGo、SearXNG、Tavily、Serper 和自动兜底。`auto` 优先直调匿名 Exa MCP 的 `web_search_exa`，只在失败或无条目时继续；查询只规范 Unicode 和空白，不做语义改写或相关性猜测。入口同时限制查询/请求/响应大小，校验公网地址与重定向，并沿用同源或 token 鉴权。
+- `worker/search.ts` 支持 Exa、Bing RSS、DuckDuckGo、SearXNG、Tavily、Serper 和自动兜底。`auto` 有付费 key 时先用 Tavily/Serper，否则从匿名 Exa MCP 的 `web_search_exa` 开始，再按 Bing RSS、SearXNG、DuckDuckGo 兜底；查询只规范 Unicode 和空白，不做语义改写或相关性猜测。入口同时限制查询/请求/响应大小，校验公网地址与重定向，并沿用同源/同站或 token 鉴权。
 - 「联网」设置保存函数搜索源、API key 和自定义 SearXNG 地址；原生搜索不读取这些配置。Worker 侧可用 `SEARCH_*` 环境变量提供默认值。
 
-当前工作树运行过 `pnpm check`、`pnpm test` 和 `pnpm build`，均通过；19 个测试文件
-176 个用例全过。Vite 仅提示主包超过 500 KB，不影响构建产物。
+当前联网证据边界：Grok 原生搜索和 DeepSeek 原生工具 400 都有真实上游响应；本地 Worker 已用完整香港天气问题真实调用 Exa，约 3.7 秒返回 6 条结果；浏览器函数工具循环由单测覆盖。Exa 接入后还应只发一次完整自然问题，复核 DeepSeek 从 function call 到最终引用结果的端到端链路，不要用短句或空请求反复探活。
 
-## 本轮（浏览器录音与聊天语音输入）
+当前工作树运行过 `pnpm check`、`pnpm test` 和 `pnpm build`，均通过；20 个测试文件、184 个用例全过。Vite 仅提示主包超过 500 KB，不影响构建产物。
+
+## 历史记录（浏览器录音与聊天语音输入，`da2df55`；配置层已被上面的语音路由取代）
 
 - 设置页新增独立「语音」标签，集中放聊天麦克风开关、全局录音操作方式，以及当前后端的聊天 STT 模型。聊天麦克风默认关闭，录音默认「按住说话」；也可改成点击开始/再次点击停止。
 - `BrowserAudioRecorder` 是不依赖 React 的录音状态机，处理权限迟到、重复停止、最短时长、空音频、编码格式、stop watchdog 和所有媒体轨道释放；React Hook 额外在卸载、页面隐藏和 `pagehide` 时清理。
@@ -53,11 +87,11 @@
 
 录音、音频文件、STT 传输、设置迁移和草稿合并等相关 8 个测试文件共 59 项通过；真麦克风交互仍需在 HTTPS/localhost 的浏览器环境做人工冒烟。
 
-## 上一轮（语音现有链路修复；当时麦克风与实时通话暂不实施）
+## 历史记录（语音现有链路修复；当时麦克风与实时通话暂不实施）
 
 用户当时明确下一阶段想做「语音输入、麦克风录音、实时语音通话」，但要求先把协议和产品
-形态沟通清楚，所以该轮没有提前实现。也没有新增语音自定义路由：现在只有图片支持请求
-路线/自定义格式；语音仍走 grok2api 原生 `/tts`、`/stt`、`/tts/voices`。
+形态沟通清楚，所以该轮没有提前实现。当时也没有语音路由，只有图片支持请求
+路线/自定义格式，语音只走 grok2api 原生 `/tts`、`/stt`、`/tts/voices`；当前实现见顶部最新一节。
 
 本轮先修了现有语音页的确定性问题：
 
@@ -132,8 +166,8 @@ API Key，也没有读取或写入用户密钥。真后端验证时让用户把 
 
 语音面板的显示和 TTS/STT 子模式只依据后端设置里的 `capabilities`。当该字段为空时
 全部展示，并提示「是否可用以上游实际响应为准」；不再用 `flavor` 或某一台 CPA 的
-404 实况推断 generic 后端是否支持语音。`flavor` 仍只用于协议差异和是否自动加载声线，
-不是能力开关。
+404 实况推断 generic 后端是否支持语音。该轮 `flavor` 还会决定是否自动加载声线；
+**当前行为已被顶部语音路由取代**：方言只参与 `auto` 协议解析，声线一律不自动请求。
 
 本轮本地验证：5174 开发服务已停止，5173 返回项目页面；`pnpm check`、`pnpm test`
 （5 个文件、59/59）、`pnpm build`、`git diff --check` 均通过。另用本地临时假后端
@@ -158,7 +192,7 @@ API Key，也没有读取或写入用户密钥。真后端验证时让用户把 
 临时视口覆盖也已重置。`pnpm check`、`pnpm test`（5 个文件、59/59）、`pnpm build`
 和 `git diff --check` 均通过；构建只有既有的主包超过 500 KB 提示。
 
-## 上一轮（实测反馈：图片超时可调 + 消息操作改成点开 + 侧栏清空）
+## 历史记录（图片超时可调 + 消息操作改成点开 + 侧栏清空）
 
 用户在真机（移动端）用起来之后的四条反馈。`pnpm check` / `pnpm build` 干净，
 `pnpm test` 53 个用例全过。
@@ -178,8 +212,9 @@ API Key，也没有读取或写入用户密钥。真后端验证时让用户把 
 也照发 `{type:"web_search"}`"的取舍是对的：**错误确实指得回来**。
 但原文全是「deserialize the JSON body into the target type」，用户看不出是自己
 点的那个开关引起的，所以 `errors.ts` 的 `annotate()` 里针对 400 + `web_search`
-补了一句"把工具栏里的「联网」关掉"。顺手修了 404 那条 —— 它还在让用户
-"去设置里重新探测一次"，而探测早删了。新增 `errors.test.ts` 9 个用例钉住。
+当时补了一句"把工具栏里的「联网」关掉"；当前提示已更新为优先把该模型切到
+「函数」搜索，也可临时关闭联网。顺手修了 404 那条 —— 它还在让用户
+"去设置里重新探测一次"，而探测早删了。相关行为由 `errors.test.ts` 钉住。
 
 用户还提到「我在 opencode 让模型联网查东西是可以的」。那是两种机制：
 opencode 把搜索做成**由客户端执行的 function tool**（模型发调用，opencode 自己
@@ -215,7 +250,7 @@ opencode 把搜索做成**由客户端执行的 function tool**（模型发调�
 而按钮就贴在标题旁，移动端误触没有找补余地；弹确认框对一个列表标题旁的
 小按钮又太重。放着不管就是取消，不用另找地方点"否"。
 
-## 更早（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
+## 更早的历史（不再替用户判断能不能用 + 历史统一到侧栏 + 单条消息可删）
 
 四件用户反馈，都做完了。`pnpm check` / `pnpm build` 干净，`pnpm test` 44 个用例全过。
 
@@ -237,9 +272,9 @@ opencode 把搜索做成**由客户端执行的 function tool**（模型发调�
 - 联网搜索按钮任何模型都能点。
 - `webSearchSupport()` 改名 `webSearchNote()`，返回 `{known, note}` ——
   **只写 tooltip，不做拦截**。
-- `buildTools()` 不再对认不出的厂商返回 `[]`。原来那样开关看着生效了其实
-  什么都没发出去，是最糟的一种失败。现在 Gemini 发 `google_search`，
-  其余一律发 `{type:"web_search"}`，上游不认就报错，报错至少指得回来。
+- `buildTools()` 当时不再对认不出的厂商返回 `[]`。原来那样开关看着生效了其实
+  什么都没发出去，是最糟的一种失败；当时 Gemini 发 `google_search`，其余一律发
+  `{type:"web_search"}`。**这段已被顶部的按模型「自动 / 原生 / 函数」路由取代。**
 
 风险评估：两个控件的默认值都是不发（`auto` / 关），所以**默认行为一点没变**，
 真发出去一定是用户点过的。CPA 的模型名后缀 `model(high)` 在非推理模型上
@@ -252,10 +287,10 @@ opencode 把搜索做成**由客户端执行的 function tool**（模型发调�
 `isGrok` 那道硬门删了，只看 `backend.capabilities`。实测 CPA 的 `/tts` `/stt`
 确实全 404，但那是那一台部署的实况，不是 `cpa` 这个方言的定义。
 现在不再在标题栏用方言写「语音端点未必存在」这类提示；面板和两个子模式都按
-`backend.capabilities` 展示。方言只用于协议差异，以及决定声线列表是否自动拉取，
-不参与能力判断。
+`backend.capabilities` 展示。该轮方言还用于决定声线列表是否自动拉取，不参与能力判断；
+**当前实现只用方言解析 `auto` 协议，不再自动拉取任何声线。**
 
-配套：**声线列表只在 grok2api 上自动拉**，别的后端给一个「加载声线」按钮。
+配套（历史行为，已被顶部新路由替代）：**声线列表只在 grok2api 上自动拉**，别的后端给一个「加载声线」按钮。
 门一撤，CPA 用户点进语音面板就会自动打一发必 404 的请求 —— 那正是这个项目
 一直在避免的事。不点也能用，上面的输入框可以直接填声线 ID。
 
@@ -445,30 +480,25 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 
 ## 当前仍需验证/继续做
 
-1. **本轮新增，待真后端/真机**：用一个确定支持视觉输入的聊天模型各发一次
-   「单图 + 文字」和纯图片，确认 CPA / grok2api 对 data URL 的实际接受形状；再在移动端
-   检查相册选择、粘贴、缩略图移除、停止和刷新历史。不要扫模型或参数矩阵。
-   另外观察几轮大图后的 IndexedDB 占用；当前有 4 张 / 单张 10 MB / 合计 20 MB 保护，
-   但 data URL 仍比原图大约三分之一，真机内存和浏览器配额只能实测。
-2. 部署环境验证视频源文件经 `/__api/upload` 上传到 R2 后，上游能否读取公网 URL。
-   （本地没法验，必须真部署一次。）
-3. 检查三个媒体面板的移动端布局、暗色模式、取消操作和错误状态。
-   代码层面读过一遍没发现问题，但没有真机/窄视口实测过。
-   **本轮新增的设置页四个标签页也在此列** —— 标签栏在窄屏是否需要横向滚动没实测。
-4. **图片路由只做过单测，没打过真后端**。特别是这两条：
+1. 用 DeepSeek 函数搜索只发一次完整自然问题，复核 `function call -> Exa -> role:tool -> 最终回答与引用`。不要用 `hi`、空请求或连续低 token 问题测活。
+2. 函数搜索的候选源共享 `SEARCH_TIMEOUT_MS` 总预算。Exa 若占满默认 7 秒，后面的 Bing RSS、SearXNG、DuckDuckGo 可能没有机会；当前网络下后三者曾超时，部署环境和匿名 Exa 的长期稳定性仍需观察。
+3. **服务端持有密钥只完成了 Worker 端**：`/__api/config`、`/__api/auth`、`/__api/proxy/*` 已有实现和测试，但前端尚未读取预置配置、创建 `mode:"proxy"` 后端或改写请求。README 已明确标成未接入。
+4. 用一个确定支持视觉输入的聊天模型各发一次「单图 + 文字」和纯图片，确认 CPA / grok2api 对 data URL 的实际接受形状；再在移动端检查相册选择、粘贴、缩略图移除、停止和刷新历史。不要扫模型或参数矩阵。另观察几轮大图后的 IndexedDB 占用；当前有 4 张 / 单张 10 MB / 合计 20 MB 保护，但 data URL 仍比原图大约三分之一。
+5. 部署环境验证视频源文件经 `/__api/upload` 上传到 R2 后，上游能否读取公网 URL。（本地没法验，必须真部署一次。）
+6. 检查图片、视频面板的移动端布局、暗色模式、取消操作和错误状态；语音顶部已在 390x844 和 1280x800 验过。全屏图片查看器的真机双指缩放也应补一次人工冒烟。设置页现有六个标签，横向滚动已实现，仍可在真机复核。
+7. **图片路由只做过单测，没打过真后端**。特别是这两条：
    - CPA 上把 Nano Banana 的路由切成 `chat`，看能不能真出图、图片在响应的哪个位置
      （通用提取够不够，还是得填 `imageUrlPaths`）。
    - grok2api 走 `chat` 路由生图。用户说它支持这个格式，但没验过响应形状。
    验的时候记住下面那条红线，一次一个请求，不要扫参数。
-5. 远程音频下载的 CORS、STT 大文件上限 —— 都还没测。
-6. **此前新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
+8. **本轮语音路由尚未打真供应商**：分别用一个 Grok 原生和一个 OpenAI Audio 后端各做一次 STT/TTS，确认 CORS、请求字段和响应形状；同时人工确认切供应商不联网、模型只在点「获取」后请求、Grok 声线只在点「加载声线」后请求。远程音频下载的 CORS、STT 大文件上限也还没测。`proxy` 语音是已知未接入，不要把它当成待测直连能力。
+9. **此前新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
    带着旧会话数据的库升级没验；生成记录攒满 50 条后的裁剪也只是代码层面正确。
    还有 `hydrateAssets` 的 `blob:` URL 释放 —— 逻辑对，但没在真实使用中观察过内存。
-7. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
+10. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
    CPA 的 `/responses` 和 `/messages` 都确认存在（上一轮实测：无鉴权 401、带 key 400），
-   要做的话有端点可打。目前只实现了 chat/completions。
-   顺带这也是联网搜索给 Claude 补上的前提 —— 得走 `/v1/messages`。
-8. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
+   要做的话有端点可打。目前只实现了 chat/completions；Claude 的客户端函数搜索已不依赖它，只有接 Claude 原生搜索才需要 `/v1/messages`。
+11. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
    真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
 
 ## ⚠️ 联调时的红线
@@ -507,7 +537,8 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 
 ## 联调需要的东西（不在仓库里）
 
-两个后端的 API key **不在任何文件里**，需要用户重新提供（上一轮已验证两个 key 都可用）：
+两个后端的 API key **不在任何文件里**。需要联调时由用户在本地设置页或未跟踪的
+`.dev.vars` 中填写，勿在聊天里提供明文（以下模型数量是当时实测快照）：
 
 - CPA：`https://cpa.yueming.uk/v1` —— 68 个模型，全是第三方接入
 - grok2api：`https://grok2.yueming.uk/v1` —— 20 个模型，独有 tts/stt
@@ -528,17 +559,17 @@ R2 桶名 `chatweb` 已填进 `wrangler.toml`。
 | `/tts`、`/stt` | ❌ 404 | ✅ |
 | `/audio/speech`、`/audio/transcriptions` | ❌ 404 | ✅ |
 
-CPA **完全没有语音端点**，但它的模型表里有 8 个会被归类成 tts 的模型
+当时实测的这台 CPA 部署**没有语音端点**，但它的模型表里有 8 个会被归类成 tts 的模型
 （三个 Gemini TTS、`Gemini 2.5 Flash Native Audio Latest`、两个 Lyria、
 `Gemini 3.1 Flash Live Preview`、`chatgpt-voice`）。
 
 早先语音面板靠 `backend.flavor === "grok2api"` 把 CPA 整个挡在门外 ——
 **本轮已删除**，用户明确否决（「这个不应该程序内部判断」）。上面这张表是
-那一台部署的实况，不是 `cpa` 这个方言的定义。现在只看设置页勾了什么，
-方言只用来在标题栏写一句提醒，外加决定声线列表要不要自动拉。
+那一台部署的实况，不是 `cpa` 这个方言的定义。现在只看设置页勾了什么；
+方言只在语音协议为 `auto` 时选择 Grok 原生或 OpenAI Audio，不会自动拉模型或声线。
 
 grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准的
-`/audio/speech` `/audio/transcriptions`。目前 `voice.ts` 走的是原生那对。
+`/audio/speech` `/audio/transcriptions`。当前 `voice.ts` 两套都支持，由语音路由选择。
 
 ## 踩过的坑（别重复踩）
 
@@ -575,6 +606,6 @@ grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准
   把注释提前闭合了，构建直接炸。
 - **`with_timestamps: true` 在这台 grok2api 上拿不到结果** —— 连续两次都返回
   503 `当前没有可用的上游账号`，而同时段不带这个参数的 TTS 正常 200。
-  怀疑是时间戳走的上游池没配账号。没有下掉这个开关（换个部署可能可用），
-  但如果用户报「返回时间戳」不工作，先怀疑这个而不是解析代码。
+  怀疑是时间戳走的上游池没配账号；当前 UI 已移除该开关，底层可选参数仍保留，
+  后续若重新开放要先在目标部署复核协议和结果承接。
 - pnpm 11 的构建脚本白名单在 `pnpm-workspace.yaml` 的 `allowBuilds`，不是 package.json。

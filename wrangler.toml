@@ -27,12 +27,11 @@ bucket_name = "chatweb"
 
 [vars]
 # —— 服务端密钥模式（可选）——
-# 填了 UPSTREAM_BASE_URL 之后，前端会显示「使用预置后端」，
-# 访问者输入 ACCESS_PASSWORD 即可使用，全程接触不到真正的 API key。
-# 留空则只有浏览器直连模式。
+# Worker 已提供 /__api/config、/__api/auth 和 /__api/proxy/*；
+# 当前前端尚未读取预置配置或创建 proxy 后端，填写这些变量只是在服务端准备接口。
 UPSTREAM_BASE_URL = ""
 UPSTREAM_NAME = ""
-# 逗号分隔，覆盖自动探测结果。留空则由前端探测。
+# 逗号分隔，由 /__api/config 原样返回。前端尚未接入预置后端；留空不会自动探测。
 # 可选值: chat,image,video,tts,stt
 UPSTREAM_CAPABILITIES = ""
 

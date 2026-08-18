@@ -20,6 +20,7 @@ import type { CatalogModel } from "@/backends/model-catalog";
 import { streamChatCompletions, inferVendor, webSearchNote } from "@/transport/chat-completions";
 import { isAbortError } from "@/transport/errors";
 import { transcribeSpeech } from "@/transport/voice";
+import { resolveVoiceConnection } from "@/transport/voice-routing";
 import { readChatContentText, type ChatContentPart, type ChatMessageContent, type ChatStreamSnapshot, type ReasoningEffort } from "@/transport/types";
 import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
 import { appendTranscriptionToDraft } from "@/features/console/chat-voice-input";
@@ -83,17 +84,17 @@ function buildUserContent(text: string, images: PendingImage[]): ChatMessageCont
 
 export function ChatPanel({
   backend,
+  backends,
   models,
-  sttModels,
   session,
   onCommit,
   onManage,
 }: {
   backend: Backend;
+  /** 包含语音设置可能引用的其它后端。 */
+  backends: Backend[];
   /** 已经过滤成"用户保存过的"，可能为空 */
   models: CatalogModel[];
-  /** 已保存且明确归类为 STT 的模型。 */
-  sttModels: CatalogModel[];
   session: ChatSession;
   onCommit: (session: ChatSession) => void;
   onManage: () => void;
@@ -157,9 +158,9 @@ export function ChatPanel({
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
-  const chatInputSTTModel = sttModels.some((item) => item.id === backend.chatInputSTTModel)
-    ? backend.chatInputSTTModel
-    : "";
+  const sttConnection = resolveVoiceConnection(backend, backends, "stt");
+  const chatInputSTTModel = sttConnection.model;
+  const chatSTTReady = sttConnection.ready;
   const voiceBusy = recorderPhase !== "idle" || transcribing;
   const searchMode = backend.webSearchModeOverrides[model] ?? "auto";
   const search = webSearchNote(model, searchMode);
@@ -313,7 +314,10 @@ export function ChatPanel({
     setVoiceError("");
 
     try {
-      if (!selectedModel) throw new Error("请先在设置的“语音”页选择聊天转写模型");
+      if (!sttConnection.ready) {
+        throw new Error(sttConnection.reason || "语音转写配置不可用，请在设置的“语音”页重新选择");
+      }
+      if (!selectedModel) throw new Error("请先在设置的“语音”页选择语音转写模型");
       const validationError = await validateSTTAudioFile(recording.file);
       if (!isCurrent()) return;
       if (validationError) throw new Error(validationError);
@@ -322,8 +326,9 @@ export function ChatPanel({
       sttAbortRef.current = controller;
       setVoiceStatus("正在将录音转成文字…");
       const result = await transcribeSpeech({
-        baseURL: backend.baseURL,
-        apiKey: backend.apiKey,
+        baseURL: sttConnection.baseURL,
+        apiKey: sttConnection.apiKey,
+        protocol: sttConnection.protocol,
         model: selectedModel,
         file: recording.file,
         signal: controller.signal,
@@ -690,9 +695,9 @@ export function ChatPanel({
                   </TooltipTrigger>
                   <TooltipContent>取消语音识别</TooltipContent>
                 </Tooltip>
-              ) : chatInputSTTModel ? (
+              ) : chatSTTReady ? (
                 <AudioRecorderButton
-                  key={`${backend.id}:${session.id}`}
+                  key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
                   mode={settings.recordingMode}
                   disabled={models.length === 0 || streaming !== null}
                   disabledReason={streaming ? "回复完成后才能录音" : undefined}
@@ -708,7 +713,7 @@ export function ChatPanel({
                       type="button"
                       variant="ghost"
                       size="icon"
-                      aria-label="设置聊天转写模型"
+                      aria-label="设置语音转写供应商"
                       disabled={streaming !== null}
                       className="size-9 shrink-0 rounded-full text-muted-foreground"
                       onClick={onManage}
@@ -716,7 +721,7 @@ export function ChatPanel({
                       <Mic className="size-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>先在设置的“语音”页选择聊天转写模型</TooltipContent>
+                  <TooltipContent>{sttConnection.reason || "请在设置的“语音”页选择语音转写供应商和模型"}</TooltipContent>
                 </Tooltip>
               )
             ) : null}

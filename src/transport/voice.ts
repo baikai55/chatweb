@@ -1,5 +1,9 @@
 import { joinURL } from "@/transport/chat-completions";
 import { TransportError, firstString, isRecord, parseJSON, toTransportError } from "@/transport/errors";
+import { synthesizeWithTTSRoute } from "@/transport/tts-routes";
+import type { CustomTTSRoute } from "@/backends/types";
+import type { STTProtocol } from "@/transport/stt-provider";
+import type { ResolvedVoiceProtocol } from "@/transport/voice-routing";
 
 export type VoiceInfo = {
   voiceId: string;
@@ -37,6 +41,8 @@ export type ListVoicesOptions = {
   baseURL: string;
   apiKey: string;
   model?: string;
+  /** 省略时保持原有 grok2api `/tts/voices` 行为。 */
+  protocol?: ResolvedVoiceProtocol;
   signal?: AbortSignal;
 };
 
@@ -47,6 +53,10 @@ export type SynthesizeSpeechOptions = {
   text: string;
   voiceId: string;
   language: string;
+  /** 省略时保持原有 grok2api `/tts` 行为。 */
+  protocol?: ResolvedVoiceProtocol;
+  /** 有值时使用用户创建的 TTS 模板，不再调用 protocol 对应的内置端点。 */
+  customRoute?: CustomTTSRoute;
   /** 实测上游只接受 0.7–1.5，超出返回 400。 */
   speed?: number;
   /** 实测只有这三种可用；aac / flac 上游返回 422。 */
@@ -60,12 +70,18 @@ export type TranscribeSpeechOptions = {
   apiKey: string;
   model: string;
   file: File;
+  /** 省略时保持原有 grok2api `/stt` 行为。 */
+  protocol?: STTProtocol | ResolvedVoiceProtocol;
   language?: string;
   signal?: AbortSignal;
 };
 
 /** 获取 TTS 声线。兼容数组以及 voices/data/items/results 等常见包裹字段。 */
 export async function listVoices(options: ListVoicesOptions): Promise<VoiceInfo[]> {
+  // OpenAI Audio 没有所有兼容供应商都实现的标准声线列表端点。
+  // 返回空列表让 UI 使用可编辑的 voice ID，不向未知路径发探测请求。
+  if (options.protocol === "openai-audio") return [];
+
   const query = options.model ? `?model=${encodeURIComponent(options.model)}` : "";
   const response = await fetch(joinURL(options.baseURL, `/tts/voices${query}`), {
     method: "GET",
@@ -90,19 +106,45 @@ export async function listVoices(options: ListVoicesOptions): Promise<VoiceInfo[
   });
 }
 
-/** 调用 grok2api 原生 /tts，兼容原始音频和 JSON 包装的 URL/base64。 */
+/** 调用 grok2api `/tts` 或 OpenAI `/audio/speech`。 */
 export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promise<SpeechAudioResult> {
-  const body: Record<string, unknown> = {
-    model: options.model,
-    text: options.text,
-    voice_id: options.voiceId,
-    language: options.language,
-  };
-  if (typeof options.speed === "number") body.speed = options.speed;
-  if (options.outputFormat) body.output_format = { codec: options.outputFormat };
-  if (options.withTimestamps) body.with_timestamps = true;
+  if (options.customRoute) {
+    return synthesizeWithTTSRoute({
+      baseURL: options.baseURL,
+      apiKey: options.apiKey,
+      route: options.customRoute,
+      model: options.model,
+      text: options.text,
+      voice: options.voiceId,
+      language: options.language,
+      speed: options.speed,
+      format: options.outputFormat,
+      signal: options.signal,
+    });
+  }
 
-  const response = await fetch(joinURL(options.baseURL, "/tts"), {
+  const protocol = options.protocol ?? "grok-native";
+  const body: Record<string, unknown> = protocol === "openai-audio"
+    ? {
+        model: options.model,
+        input: options.text,
+        voice: options.voiceId,
+      }
+    : {
+        model: options.model,
+        text: options.text,
+        voice_id: options.voiceId,
+        language: options.language,
+      };
+  if (typeof options.speed === "number") body.speed = options.speed;
+  if (options.outputFormat) {
+    if (protocol === "openai-audio") body.response_format = options.outputFormat;
+    else body.output_format = { codec: options.outputFormat };
+  }
+  if (protocol === "grok-native" && options.withTimestamps) body.with_timestamps = true;
+
+  const path = protocol === "openai-audio" ? "/audio/speech" : "/tts";
+  const response = await fetch(joinURL(options.baseURL, path), {
     method: "POST",
     headers: jsonHeaders(options.apiKey, "application/json, audio/*, application/octet-stream"),
     body: JSON.stringify(body),
@@ -151,29 +193,45 @@ export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promis
   };
 }
 
-/** 上传音频到 grok2api 原生 /stt，并把常见转写响应收敛成统一结构。 */
+/** 上传音频到 grok2api `/stt` 或 OpenAI `/audio/transcriptions`。 */
 export async function transcribeSpeech(options: TranscribeSpeechOptions): Promise<TranscriptionResult> {
+  const protocol = options.protocol ?? "grok-stt";
+  const openAIAudio = protocol === "openai-transcriptions" || protocol === "openai-audio";
   const form = new FormData();
   form.append("model", options.model);
-  // format=true 让上游规范化数字和标点（实测 "十一万五千六百九十九" → "115,699"），
-  // 但它**要求同时给出 language** —— 只给 format 会直接 400
-  // `Field 'language' is required when 'format' is true`。
-  // 语言选「自动识别」时只能放弃格式化，两个字段一起省掉照样能转写。
   if (options.language) {
     form.append("language", options.language);
-    form.append("format", "true");
+    if (!openAIAudio) {
+      // grok2api 的 format=true 会规范化数字和标点，但要求同时给 language。
+      // OpenAI Audio Transcriptions 没有这个字段，不能把它转发给兼容供应商。
+      form.append("format", "true");
+    }
   }
   form.append("file", options.file, options.file.name);
 
   const headers = new Headers({ Accept: "application/json, text/plain" });
   if (options.apiKey) headers.set("Authorization", `Bearer ${options.apiKey}`);
 
-  const response = await fetch(joinURL(options.baseURL, "/stt"), {
-    method: "POST",
-    headers,
-    body: form,
-    signal: options.signal,
-  });
+  const path = openAIAudio ? "/audio/transcriptions" : "/stt";
+  let response: Response;
+  try {
+    response = await fetch(joinURL(options.baseURL, path), {
+      method: "POST",
+      headers,
+      body: form,
+      signal: options.signal,
+    });
+  } catch (caught) {
+    if (caught instanceof DOMException && caught.name === "AbortError") throw caught;
+    if (caught instanceof TypeError) {
+      throw new TransportError(
+        0,
+        "无法连接语音转写接口。请检查地址、网络和 HTTPS 证书；浏览器直连还要求供应商允许跨域访问（CORS）。",
+        "network_error",
+      );
+    }
+    throw caught;
+  }
   const responseText = await response.text();
   if (!response.ok) throw toTransportError(response, responseText);
 

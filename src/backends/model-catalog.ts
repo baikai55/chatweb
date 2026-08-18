@@ -50,6 +50,11 @@ export type ModelCatalog = {
   fetchedAt: number;
 };
 
+/** React Query 与手动刷新共用同一个稳定 key；不把原始密钥放进 key。 */
+export function modelCatalogQueryKey(backend: Pick<Backend, "id" | "baseURL">) {
+  return ["models", backend.id, backend.baseURL] as const;
+}
+
 /** 缓存多久之内算新鲜。只用来提示"这份可能过期了"，不再自动重拉。 */
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -85,7 +90,7 @@ export async function refreshModelCatalog(
 ): Promise<ModelCatalog> {
   const { rows, flavor } = await fetchFromNetwork(backend, signal);
   const fetchedAt = Date.now();
-  void writeCache({ backendId: backend.id, fetchedAt, baseURL: backend.baseURL, flavor, rows });
+  await writeCache({ backendId: backend.id, fetchedAt, baseURL: backend.baseURL, flavor, rows });
   return { models: decorate(rows, backend), flavor, fetchedAt };
 }
 
@@ -148,15 +153,15 @@ async function fetchFromNetwork(
 /**
  * 后端方言识别。用响应头，不猜。
  *
- * CPA 把 X-CPA-* 全放进了 Access-Control-Expose-Headers，所以浏览器读得到；
- * grok2api 只暴露 X-Request-ID。这两样都在 `/models` 的响应里，
- * 所以识别方言不需要额外发请求 —— 拉模型时顺手读一下就有了。
+ * CPA 把 X-CPA-* 全放进了 Access-Control-Expose-Headers，所以浏览器读得到。
+ * X-Request-ID 不能用于识别 grok2api：OpenAI 官方和大量兼容网关同样返回它。
+ * 无法确定时保留 generic，让语音 auto 使用覆盖面更广的 OpenAI Audio；
+ * grok2api 原生端点仍可在语音设置里显式选择。
  */
 export function readFlavor(headers: Headers): BackendFlavor {
   if (headers.get("X-CPA-Version") || headers.get("x-cpa-trace-id")) return "cpa";
   // 兜底：有些部署可能不回版本头，看 expose 列表里有没有 X-CPA
   if ((headers.get("Access-Control-Expose-Headers") ?? "").toLowerCase().includes("x-cpa")) return "cpa";
-  if (headers.get("X-Request-ID")) return "grok2api";
   return "generic";
 }
 
@@ -223,7 +228,12 @@ const CLASSIFY_RULES: Array<{ kind: Exclude<ModelKind, "auto">; patterns: string
   {
     kind: "stt",
     // stt 放在 tts 之前：`grok-stt` 不含 tts 关键词，但把顺序写明确省得以后加规则时踩坑
-    patterns: ["whisper", "transcribe", "-stt", "stt-", "-asr", "asr-"],
+    patterns: [
+      "whisper", "transcribe", "-stt", "stt-", "-asr", "asr-",
+      // 硅基流动当前两款 ASR 的模型 id 分别没有标准 `-asr` 分隔符：
+      // FunAudioLLM/SenseVoiceSmall、TeleAI/TeleSpeechASR。
+      "sensevoice", "speechasr",
+    ],
   },
   {
     kind: "tts",

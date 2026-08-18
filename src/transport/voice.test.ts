@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TransportError } from "@/transport/errors";
+import { MIMO_CHAT_TTS_ROUTE } from "@/transport/tts-routes";
 import {
   listVoices,
   releaseSpeechAudio,
@@ -112,9 +113,45 @@ describe("listVoices", () => {
       code: "invalid_response",
     });
   });
+
+  it("OpenAI Audio 不探测不存在的通用声线列表端点", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listVoices(listOptions({ protocol: "openai-audio" }))).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("synthesizeSpeech", () => {
+  it("选择 MiMo 自定义路由后通过 Chat Completions 合成语音", async () => {
+    const audio = "UklGRgAAAAAAAAAAAAAA";
+    const fetchMock = stubFetch(new Response(JSON.stringify({
+      choices: [{ message: { audio: { data: audio } } }],
+    }), { headers: { "content-type": "application/json" } }));
+
+    await expect(synthesizeSpeech(ttsOptions({
+      customRoute: MIMO_CHAT_TTS_ROUTE,
+      model: "mimo-v2.5-tts",
+      voiceId: "mimo_default",
+      outputFormat: "wav",
+    }))).resolves.toEqual({
+      url: `data:audio/wav;base64,${audio}`,
+      contentType: "audio/wav",
+      source: "base64",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/chat/completions`);
+    const init = requestInit(fetchMock);
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer sk-test");
+    expect(JSON.parse(String(init.body))).toEqual({
+      model: "mimo-v2.5-tts",
+      messages: [{ role: "assistant", content: "你好，世界" }],
+      audio: { voice: "mimo_default", format: "wav" },
+      stream: false,
+    });
+  });
+
   it("按 grok2api 形状发送完整 TTS 请求体", async () => {
     const controller = new AbortController();
     const fetchMock = stubFetch(new Response(JSON.stringify({
@@ -148,6 +185,40 @@ describe("synthesizeSpeech", () => {
       output_format: { codec: "opus" },
       with_timestamps: true,
     });
+  });
+
+  it("按 OpenAI Audio 形状调用 /audio/speech，并复用二进制响应解析", async () => {
+    const bytes = new Uint8Array([82, 73, 70, 70, 1, 2, 3]);
+    const fetchMock = stubFetch(new Response(bytes, {
+      headers: { "content-type": "audio/wav" },
+    }));
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:openai-speech");
+
+    await expect(synthesizeSpeech(ttsOptions({
+      protocol: "openai-audio",
+      model: "gpt-4o-mini-tts",
+      voiceId: "alloy",
+      speed: 1.2,
+      outputFormat: "wav",
+      withTimestamps: true,
+    }))).resolves.toEqual({
+      url: "blob:openai-speech",
+      contentType: "audio/wav",
+      source: "binary",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/audio/speech`);
+    const init = requestInit(fetchMock);
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer sk-test");
+    expect(JSON.parse(String(init.body))).toEqual({
+      model: "gpt-4o-mini-tts",
+      input: "你好，世界",
+      voice: "alloy",
+      speed: 1.2,
+      response_format: "wav",
+    });
+    expect(createObjectURL).toHaveBeenCalledOnce();
   });
 
   it("读取二进制音频，并把 audio/opus 规范为浏览器可播放的 audio/ogg", async () => {
@@ -352,6 +423,61 @@ describe("transcribeSpeech", () => {
     expect(Array.from(new Uint8Array(await (uploaded as File).arrayBuffer()))).toEqual([82, 73, 70, 70]);
     expect(Array.from(form.keys())).toEqual(["model", "file"]);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("OpenAI-compatible 模式调用 /audio/transcriptions，只上传 model 和 file", async () => {
+    const fetchMock = stubFetch(new Response(JSON.stringify({ text: "OpenAI 转写结果" }), {
+      headers: { "content-type": "application/json" },
+    }));
+
+    await expect(transcribeSpeech(sttOptions({ protocol: "openai-transcriptions" }))).resolves.toEqual({
+      text: "OpenAI 转写结果",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/audio/transcriptions`);
+    const init = requestInit(fetchMock);
+    expect(init.method).toBe("POST");
+    const headers = new Headers(init.headers);
+    expect(headers.get("authorization")).toBe("Bearer sk-test");
+    // FormData 会由 fetch 自动生成带 boundary 的 Content-Type。
+    expect(headers.get("content-type")).toBeNull();
+    expect(headers.get("accept")).toBe("application/json, text/plain");
+
+    const form = init.body as FormData;
+    expect(Array.from(form.keys())).toEqual(["model", "file"]);
+    expect(form.get("model")).toBe("grok-stt");
+    expect(form.has("language")).toBe(false);
+    expect(form.has("format")).toBe(false);
+  });
+
+  it("OpenAI-compatible 模式允许传 language，但绝不发送 grok 的 format", async () => {
+    const fetchMock = stubFetch(new Response(JSON.stringify({ text: "你好" }), {
+      headers: { "content-type": "application/json" },
+    }));
+
+    await expect(transcribeSpeech(sttOptions({
+      protocol: "openai-transcriptions",
+      language: "zh",
+    }))).resolves.toEqual({ text: "你好" });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/audio/transcriptions`);
+    const form = requestInit(fetchMock).body as FormData;
+    expect(Array.from(form.keys())).toEqual(["model", "language", "file"]);
+    expect(form.get("language")).toBe("zh");
+    expect(form.has("format")).toBe(false);
+  });
+
+  it("浏览器直连失败时提示检查地址和 CORS", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+    await expect(transcribeSpeech(sttOptions({
+      protocol: "openai-transcriptions",
+    }))).rejects.toMatchObject({
+      name: "TransportError",
+      status: 0,
+      code: "network_error",
+      message: expect.stringContaining("CORS"),
+    });
   });
 
   it("指定语言时同时发送 language/format，并解析 JSON words", async () => {
