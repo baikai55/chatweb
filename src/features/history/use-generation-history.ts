@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import {
+  createGenerationPersistenceFailure,
   createGenerationId,
   deleteGeneration,
   deleteGenerationsThrough,
@@ -11,8 +13,17 @@ import {
   saveGeneration,
   type GenerationAsset,
   type GenerationKind,
+  type GenerationPersistenceOperation,
+  type GenerationPersistenceResult,
   type GenerationRecord,
 } from "@/features/history/generation-store";
+
+const PERSISTENCE_ERROR_MESSAGES: Record<GenerationPersistenceOperation, string> = {
+  save: "生成结果未能保存，刷新页面后可能丢失",
+  delete: "删除未能写入浏览器存储，刷新后记录可能恢复",
+  clear: "清空未能写入浏览器存储，刷新后记录可能恢复",
+  prune: "旧生成记录清理失败，请检查浏览器存储空间",
+};
 
 /**
  * 合并异步读回的旧记录与加载期间刚生成的新记录。
@@ -46,16 +57,22 @@ export function mergeGenerationRecords(
 export function useGenerationHistory(scope: string, kind: GenerationKind) {
   const [records, setRecords] = useState<GenerationRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [persistenceError, setPersistenceError] = useState<
+    Exclude<GenerationPersistenceResult, { ok: true }> | null
+  >(null);
   const loadEpochRef = useRef(0);
   const clearedThroughRef = useRef(-Infinity);
+  const persistenceAttemptRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     const loadEpoch = loadEpochRef.current + 1;
     loadEpochRef.current = loadEpoch;
     clearedThroughRef.current = -Infinity;
+    persistenceAttemptRef.current += 1;
     setLoading(true);
     setRecords([]);
+    setPersistenceError(null);
 
     void loadGenerations(scope, kind).then((loaded) => {
       if (cancelled || loadEpochRef.current !== loadEpoch) return;
@@ -70,6 +87,27 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
 
     return () => { cancelled = true; };
   }, [scope, kind]);
+
+  useEffect(() => {
+    if (!persistenceError) return;
+    console.error(`生成历史持久化失败（${persistenceError.operation}）`, persistenceError.error);
+    toast.error(PERSISTENCE_ERROR_MESSAGES[persistenceError.operation]);
+  }, [persistenceError]);
+
+  const trackPersistence = useCallback((
+    promise: Promise<GenerationPersistenceResult>,
+    fallbackOperation: GenerationPersistenceOperation,
+  ): Promise<GenerationPersistenceResult> => {
+    const attempt = persistenceAttemptRef.current + 1;
+    persistenceAttemptRef.current = attempt;
+    const observed = promise.catch((caught: unknown) =>
+      createGenerationPersistenceFailure(fallbackOperation, caught));
+    void observed.then((result) => {
+      if (persistenceAttemptRef.current !== attempt) return;
+      setPersistenceError(result.ok ? null : result);
+    });
+    return observed;
+  }, []);
 
   const record = useCallback((input: {
     model: string;
@@ -91,14 +129,16 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
       params: input.params,
     };
     setRecords((previous) => mergeGenerationRecords([created], previous));
-    void saveGeneration(created).then(() => pruneGenerations(scope, kind));
+    const persisted = saveGeneration(created).then((result) =>
+      result.ok ? pruneGenerations(scope, kind) : result);
+    void trackPersistence(persisted, "save");
     return created;
-  }, [scope, kind]);
+  }, [scope, kind, trackPersistence]);
 
   const remove = useCallback((id: string) => {
     setRecords((previous) => previous.filter((item) => item.id !== id));
-    void deleteGeneration(id);
-  }, []);
+    return trackPersistence(deleteGeneration(id), "delete");
+  }, [trackPersistence]);
 
   /** 清掉当前后端 + 当前面板的全部记录。设置页那个「删除全部」是跨后端的，不走这里。 */
   const clear = useCallback(() => {
@@ -108,8 +148,18 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
     loadEpochRef.current += 1;
     setLoading(false);
     setRecords([]);
-    void deleteGenerationsThrough(scope, kind, cutoff);
-  }, [scope, kind]);
+    return trackPersistence(deleteGenerationsThrough(scope, kind, cutoff), "clear");
+  }, [scope, kind, trackPersistence]);
 
-  return { records, loading, record, remove, clear };
+  const clearPersistenceError = useCallback(() => setPersistenceError(null), []);
+
+  return {
+    records,
+    loading,
+    persistenceError,
+    clearPersistenceError,
+    record,
+    remove,
+    clear,
+  };
 }

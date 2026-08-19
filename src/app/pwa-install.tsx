@@ -60,9 +60,14 @@ export function InstallAppButton() {
       toast.info("请打开浏览器分享菜单，选择“添加到主屏幕”");
       return;
     }
+
+    const activePrompt = promptEvent;
+    // beforeinstallprompt 只能消费一次；同步清掉模块缓存，避免其他挂载实例或重新挂载再次显示旧按钮。
+    if (deferredPrompt === activePrompt) deferredPrompt = null;
+    installListeners.forEach((listener) => listener());
     try {
-      await promptEvent.prompt();
-      await promptEvent.userChoice;
+      await activePrompt.prompt();
+      await activePrompt.userChoice;
     } catch {
       // 浏览器可能只允许同一个安装事件调用一次。
     } finally {

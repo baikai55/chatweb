@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+/** @vitest-environment happy-dom */
 
-import { SEARCH_PROVIDERS, appSettingsSchema } from "@/shared/settings/app-settings";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  SEARCH_PROVIDERS,
+  appSettingsSchema,
+  loadAppSettings,
+  subscribeAppSettings,
+} from "@/shared/settings/app-settings";
 
 describe("appSettingsSchema", () => {
   it("新安装默认隐藏聊天麦克风", () => {
@@ -56,5 +63,77 @@ describe("appSettingsSchema", () => {
 
   it("拒绝未知搜索源", () => {
     expect(appSettingsSchema.safeParse({ searchProvider: "google" }).success).toBe(false);
+  });
+});
+
+describe("app settings 跨标签页同步", () => {
+  it("只注册一个 storage 监听器", () => {
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const unsubscribeFirst = subscribeAppSettings(vi.fn());
+    const unsubscribeSecond = subscribeAppSettings(vi.fn());
+
+    loadAppSettings();
+    loadAppSettings();
+
+    expect(addEventListener.mock.calls.filter(([type]) => type === "storage")).toHaveLength(1);
+    unsubscribeFirst();
+    unsubscribeSecond();
+    addEventListener.mockRestore();
+  });
+
+  it("接收其它标签页的设置并刷新模块缓存", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppSettings(listener);
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:settings",
+      newValue: JSON.stringify({ submitMode: "ctrl-enter", showChatMicrophone: true }),
+    }));
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      submitMode: "ctrl-enter",
+      showChatMicrophone: true,
+      imageTimeoutSeconds: 300,
+    }));
+    expect(loadAppSettings()).toMatchObject({
+      submitMode: "ctrl-enter",
+      showChatMicrophone: true,
+    });
+    unsubscribe();
+  });
+
+  it("其它标签页删除设置或写入坏 JSON 时回到默认值并通知订阅者", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppSettings(listener);
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:settings",
+      newValue: null,
+    }));
+    expect(loadAppSettings()).toEqual(appSettingsSchema.parse({}));
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:settings",
+      newValue: "{broken",
+    }));
+    expect(loadAppSettings()).toEqual(appSettingsSchema.parse({}));
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
+
+  it("忽略无关的 storage 键", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppSettings(listener);
+    const before = loadAppSettings();
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "unrelated",
+      newValue: JSON.stringify({ submitMode: "enter" }),
+    }));
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(loadAppSettings()).toBe(before);
+    unsubscribe();
   });
 });

@@ -5,6 +5,7 @@ import {
   type ChatToolActivity,
   type ReasoningEffort,
 } from "@/transport/types";
+import { isRecord } from "@/transport/errors";
 
 /**
  * 聊天会话存储。
@@ -82,6 +83,67 @@ export function createBlankSession(scope: string, model: string): ChatSession {
   };
 }
 
+const CHAT_ROLES = new Set(["system", "user", "assistant"]);
+const REASONING_EFFORTS = new Set(["auto", "none", "low", "medium", "high", "xhigh"]);
+const TOOL_STATUSES = new Set(["in_progress", "completed", "failed"]);
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isChatContentPart(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.type === "text") return typeof value.text === "string";
+  if (value.type !== "image_url" || !isRecord(value.image_url)) return false;
+  return typeof value.image_url.url === "string"
+    && (value.image_url.detail === undefined
+      || value.image_url.detail === "auto"
+      || value.image_url.detail === "low"
+      || value.image_url.detail === "high");
+}
+
+function isToolActivity(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.type === "string"
+    && typeof value.name === "string"
+    && typeof value.status === "string"
+    && TOOL_STATUSES.has(value.status)
+    && typeof value.detail === "string";
+}
+
+function isConversationMessage(value: unknown): value is ConversationMessage {
+  if (!isRecord(value)) return false;
+  const validContent = typeof value.content === "string"
+    || (Array.isArray(value.content) && value.content.every(isChatContentPart));
+  return typeof value.id === "string"
+    && typeof value.role === "string"
+    && CHAT_ROLES.has(value.role)
+    && validContent
+    && isOptionalString(value.reasoning)
+    && isOptionalString(value.nativeFinishReason)
+    && (value.tools === undefined
+      || (Array.isArray(value.tools) && value.tools.every(isToolActivity)));
+}
+
+/** IndexedDB 可能残留旧版本或手工写入的数据，读取时不能只依赖 TypeScript 类型。 */
+function isChatSession(value: unknown): value is ChatSession {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.scope === "string"
+    && typeof value.title === "string"
+    && typeof value.createdAt === "number"
+    && Number.isFinite(value.createdAt)
+    && typeof value.updatedAt === "number"
+    && Number.isFinite(value.updatedAt)
+    && typeof value.model === "string"
+    && typeof value.reasoningEffort === "string"
+    && REASONING_EFFORTS.has(value.reasoningEffort)
+    && typeof value.webSearch === "boolean"
+    && Array.isArray(value.messages)
+    && value.messages.every(isConversationMessage);
+}
+
 /** 用第一条用户消息做标题。 */
 export function deriveSessionTitle(messages: ConversationMessage[]): string {
   const first = messages.find((message) => message.role === "user");
@@ -98,8 +160,9 @@ export function deriveSessionTitle(messages: ConversationMessage[]): string {
 
 /** 按更新时间倒序。空会话（一条消息都没有）不返回，避免历史里全是空壳。 */
 export async function loadSessions(scope: string): Promise<ChatSession[]> {
-  const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
+  const rows = await idbGetByScope<unknown>(STORE_SESSIONS, "byScope", scope);
   return rows
+    .filter(isChatSession)
     .filter((session) => session.messages.length > 0)
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }

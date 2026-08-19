@@ -1,5 +1,5 @@
 import { STORE_GENERATIONS, idbClear, idbDelete, idbGetByPrefix, idbPut } from "@/shared/db/idb";
-import { isAbortError } from "@/transport/errors";
+import { isAbortError, isRecord } from "@/transport/errors";
 import { createRequestTimeoutScope, DEFAULT_MEDIA_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 /**
@@ -44,6 +44,39 @@ export type GenerationRecord = {
   /** 点回一条记录时用来复原面板上的参数。形状随面板而定，读的时候要防着缺字段。 */
   params?: Record<string, unknown>;
 };
+
+export type GenerationPersistenceOperation = "save" | "delete" | "clear" | "prune";
+
+export type GenerationPersistenceFailure = {
+  ok: false;
+  operation: GenerationPersistenceOperation;
+  error: Error;
+};
+
+export type GenerationPersistenceResult = { ok: true } | GenerationPersistenceFailure;
+
+export function createGenerationPersistenceFailure(
+  operation: GenerationPersistenceOperation,
+  caught: unknown,
+): GenerationPersistenceFailure {
+  return {
+    ok: false,
+    operation,
+    error: caught instanceof Error ? caught : new Error(String(caught)),
+  };
+}
+
+async function persistGeneration(
+  operation: GenerationPersistenceOperation,
+  action: () => Promise<unknown>,
+): Promise<GenerationPersistenceResult> {
+  try {
+    await action();
+    return { ok: true };
+  } catch (caught) {
+    return createGenerationPersistenceFailure(operation, caught);
+  }
+}
 
 /** 每个后端每个面板留多少条。存的是二进制，但生图一条能有四张，别无上限。 */
 export const MAX_GENERATIONS_PER_KIND = 50;
@@ -90,31 +123,52 @@ export function deriveGenerationTitle(prompt: string): string {
   return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
 
+function isGenerationAsset(value: unknown): value is GenerationAsset {
+  if (!isRecord(value)) return false;
+  return isOptionalString(value.url)
+    && (value.blob === undefined || value.blob instanceof Blob)
+    && isOptionalString(value.contentType)
+    && isOptionalString(value.note);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+/** 只接受面板能够安全排序、显示和恢复的持久化记录。可选字段继续兼容旧记录。 */
+function isGenerationRecord(value: unknown): value is GenerationRecord {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.scope === "string"
+    && typeof value.kind === "string"
+    && GENERATION_KINDS.includes(value.kind as GenerationKind)
+    && typeof value.createdAt === "number"
+    && Number.isFinite(value.createdAt)
+    && typeof value.model === "string"
+    && typeof value.title === "string"
+    && isOptionalString(value.text)
+    && Array.isArray(value.assets)
+    && value.assets.every(isGenerationAsset)
+    && (value.params === undefined || isRecord(value.params));
+}
+
 /** 按创建时间倒序。 */
 export async function loadGenerations(scope: string, kind: GenerationKind): Promise<GenerationRecord[]> {
   try {
-    const rows = await idbGetByPrefix<GenerationRecord>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
-    return rows.sort((a, b) => b.createdAt - a.createdAt);
+    const rows = await idbGetByPrefix<unknown>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
+    return rows.filter(isGenerationRecord).sort((a, b) => b.createdAt - a.createdAt);
   } catch {
     // 隐私模式或数据库打不开。降级成"没有历史"，不影响生成。
     return [];
   }
 }
 
-export async function saveGeneration(record: GenerationRecord): Promise<void> {
-  try {
-    await idbPut(STORE_GENERATIONS, record);
-  } catch {
-    // 写失败不该打断面板，结果还在眼前
-  }
+export function saveGeneration(record: GenerationRecord): Promise<GenerationPersistenceResult> {
+  return persistGeneration("save", () => idbPut(STORE_GENERATIONS, record));
 }
 
-export async function deleteGeneration(id: string): Promise<void> {
-  try {
-    await idbDelete(STORE_GENERATIONS, id);
-  } catch {
-    // 忽略
-  }
+export function deleteGeneration(id: string): Promise<GenerationPersistenceResult> {
+  return persistGeneration("delete", () => idbDelete(STORE_GENERATIONS, id));
 }
 
 /** 删除一次“清空”发生之前的当前后端/面板记录，不误删清空后新生成的结果。 */
@@ -122,29 +176,30 @@ export async function deleteGenerationsThrough(
   scope: string,
   kind: GenerationKind,
   createdAt: number,
-): Promise<void> {
-  try {
-    const rows = await idbGetByPrefix<GenerationRecord>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
+): Promise<GenerationPersistenceResult> {
+  return persistGeneration("clear", async () => {
+    const rows = await idbGetByPrefix<unknown>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
     await Promise.all(rows
+      .filter(isGenerationRecord)
       .filter((record) => record.createdAt <= createdAt)
       .map((record) => idbDelete(STORE_GENERATIONS, record.id)));
-  } catch {
-    // 忽略；与单条删除一样，存储失败不阻断当前界面
-  }
+  });
 }
 
 /** 超出上限时清理最旧的。保存后异步调一下即可，不用等。 */
-export async function pruneGenerations(scope: string, kind: GenerationKind): Promise<void> {
-  try {
-    const rows = await idbGetByPrefix<GenerationRecord>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
-    if (rows.length <= MAX_GENERATIONS_PER_KIND) return;
-    const excess = rows
+export function pruneGenerations(
+  scope: string,
+  kind: GenerationKind,
+): Promise<GenerationPersistenceResult> {
+  return persistGeneration("prune", async () => {
+    const rows = await idbGetByPrefix<unknown>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
+    const validRows = rows.filter(isGenerationRecord);
+    if (validRows.length <= MAX_GENERATIONS_PER_KIND) return;
+    const excess = validRows
       .sort((a, b) => a.createdAt - b.createdAt)
-      .slice(0, rows.length - MAX_GENERATIONS_PER_KIND);
+      .slice(0, validRows.length - MAX_GENERATIONS_PER_KIND);
     await Promise.all(excess.map((record) => idbDelete(STORE_GENERATIONS, record.id)));
-  } catch {
-    // 忽略
-  }
+  });
 }
 
 export async function clearAllGenerations(): Promise<void> {

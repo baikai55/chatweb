@@ -147,6 +147,7 @@ export function ChatPanel({
   const voiceCallButtonRef = useRef<HTMLButtonElement | null>(null);
   const dragDepthRef = useRef(0);
   const readingImageStatsRef = useRef({ count: 0, bytes: 0 });
+  const imageReadEpochRef = useRef(0);
   const currentSessionIdRef = useRef(session.id);
   currentSessionIdRef.current = session.id;
   const latestSessionRef = useRef(session);
@@ -171,12 +172,14 @@ export function ChatPanel({
     setTranscribing(false);
     setVoiceStatus("");
     setVoiceError("");
+    imageReadEpochRef.current += 1;
     dragDepthRef.current = 0;
     readingImageStatsRef.current = { count: 0, bytes: 0 };
     streamSnapshotRef.current = null;
 
     return () => {
       // 切会话、删当前会话或切后端时，旧请求不能再把旧会话写回当前界面。
+      imageReadEpochRef.current += 1;
       requestSequenceRef.current += 1;
       abortRef.current?.abort();
       abortRef.current = null;
@@ -223,6 +226,7 @@ export function ChatPanel({
     const files = Array.from(incoming);
     if (files.length === 0) return;
     const targetSessionId = session.id;
+    const readEpoch = imageReadEpochRef.current;
 
     const imageFiles = files.filter(isImageInputFile);
     if (imageFiles.length < files.length) {
@@ -268,7 +272,7 @@ export function ChatPanel({
     };
     setReadingImages((count) => count + valid.length);
     void Promise.allSettled(valid.map((file) => readImageInputFile(file, createMessageId()))).then((results) => {
-      if (currentSessionIdRef.current !== targetSessionId) return;
+      if (currentSessionIdRef.current !== targetSessionId || imageReadEpochRef.current !== readEpoch) return;
       const loaded = results
         .filter((result): result is PromiseFulfilledResult<PendingImage> => result.status === "fulfilled")
         .map((result) => result.value);
@@ -279,7 +283,7 @@ export function ChatPanel({
         toast.error("有图片读取失败，请重试");
       }
     }).finally(() => {
-      if (currentSessionIdRef.current !== targetSessionId) return;
+      if (currentSessionIdRef.current !== targetSessionId || imageReadEpochRef.current !== readEpoch) return;
       const current = readingImageStatsRef.current;
       readingImageStatsRef.current = {
         count: Math.max(0, current.count - valid.length),

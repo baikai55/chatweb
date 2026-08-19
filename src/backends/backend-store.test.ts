@@ -1,6 +1,14 @@
+/** @vitest-environment happy-dom */
+
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { exportBackends, getBackendReferences, importBackends } from "@/backends/backend-store";
+import {
+  exportBackends,
+  getBackendReferences,
+  importBackends,
+  loadBackendState,
+  subscribeBackends,
+} from "@/backends/backend-store";
 import { createBackend } from "@/backends/types";
 
 describe("exportBackends", () => {
@@ -15,6 +23,82 @@ describe("exportBackends", () => {
 
   afterAll(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("只注册一个 storage 监听器", () => {
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const unsubscribeFirst = subscribeBackends(vi.fn());
+    const unsubscribeSecond = subscribeBackends(vi.fn());
+
+    loadBackendState();
+    loadBackendState();
+
+    expect(addEventListener.mock.calls.filter(([type]) => type === "storage")).toHaveLength(1);
+    unsubscribeFirst();
+    unsubscribeSecond();
+    addEventListener.mockRestore();
+  });
+
+  it("接收其它标签页的后端配置并刷新模块缓存", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeBackends(listener);
+    const backend = createBackend({
+      id: "cross-tab",
+      name: "跨标签页后端",
+      baseURL: "https://cross-tab.example/v1",
+    });
+    const next = {
+      version: 1,
+      backends: [backend],
+      activeBackendId: "missing",
+    };
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:backends",
+      newValue: JSON.stringify(next),
+    }));
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      activeBackendId: backend.id,
+      backends: [expect.objectContaining({ id: backend.id })],
+    }));
+    expect(loadBackendState().activeBackendId).toBe(backend.id);
+    unsubscribe();
+  });
+
+  it("其它标签页删除配置或写入坏 JSON 时回到空状态并通知订阅者", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeBackends(listener);
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:backends",
+      newValue: null,
+    }));
+    expect(loadBackendState()).toEqual({ version: 1, backends: [], activeBackendId: null });
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "chatweb:backends",
+      newValue: "{broken",
+    }));
+    expect(loadBackendState()).toEqual({ version: 1, backends: [], activeBackendId: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
+
+  it("忽略无关的 storage 键", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeBackends(listener);
+    const before = loadBackendState();
+
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "unrelated",
+      newValue: JSON.stringify({ version: 1, backends: [] }),
+    }));
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(loadBackendState()).toBe(before);
+    unsubscribe();
   });
 
   it("按 includeKeys 同时脱敏或保留后端与独立 STT 密钥", () => {

@@ -63,8 +63,10 @@ type Listener = (settings: AppSettings) => void;
 
 const listeners = new Set<Listener>();
 let cache: AppSettings | null = null;
+let storageListenerRegistered = false;
 
 export function loadAppSettings(): AppSettings {
+  ensureStorageListener();
   if (cache) return cache;
   cache = readFromStorage();
   return cache;
@@ -74,16 +76,49 @@ function readFromStorage(): AppSettings {
   if (typeof localStorage === "undefined") return DEFAULTS;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
-    const parsed = appSettingsSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : DEFAULTS;
+    return parseStoredSettings(raw);
   } catch {
     // 隐私模式下 localStorage 可能直接抛异常
     return DEFAULTS;
   }
 }
 
+function parseStoredSettings(raw: string | null): AppSettings {
+  if (!raw) return DEFAULTS;
+  try {
+    const parsed = appSettingsSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : DEFAULTS;
+  } catch {
+    return DEFAULTS;
+  }
+}
+
+function ensureStorageListener(): void {
+  if (storageListenerRegistered || typeof window === "undefined") return;
+  window.addEventListener("storage", handleStorageChange);
+  storageListenerRegistered = true;
+}
+
+function handleStorageChange(event: StorageEvent): void {
+  if (event.key !== STORAGE_KEY && event.key !== null) return;
+  if (!isLocalStorageEvent(event)) return;
+
+  const next = parseStoredSettings(event.newValue);
+  cache = next;
+  for (const listener of listeners) listener(next);
+}
+
+function isLocalStorageEvent(event: StorageEvent): boolean {
+  if (!event.storageArea) return true;
+  try {
+    return event.storageArea === window.localStorage;
+  } catch {
+    return false;
+  }
+}
+
 export function patchAppSettings(patch: Partial<AppSettings>): AppSettings {
+  ensureStorageListener();
   const next = { ...loadAppSettings(), ...patch };
   cache = next;
   try {
@@ -95,10 +130,15 @@ export function patchAppSettings(patch: Partial<AppSettings>): AppSettings {
   return next;
 }
 
+export function subscribeAppSettings(listener: Listener): () => void {
+  ensureStorageListener();
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 function subscribe(listener: () => void): () => void {
   const wrapped: Listener = () => listener();
-  listeners.add(wrapped);
-  return () => listeners.delete(wrapped);
+  return subscribeAppSettings(wrapped);
 }
 
 export function useAppSettings(): AppSettings {

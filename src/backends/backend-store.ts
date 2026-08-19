@@ -22,8 +22,10 @@ type Listener = (state: BackendState) => void;
 
 const listeners = new Set<Listener>();
 let cache: BackendState | null = null;
+let storageListenerRegistered = false;
 
 export function loadBackendState(): BackendState {
+  ensureStorageListener();
   if (cache) return cache;
   cache = readFromStorage();
   return cache;
@@ -38,14 +40,41 @@ function readFromStorage(): BackendState {
     // 隐私模式下 localStorage 可能直接抛异常
     return EMPTY_STATE;
   }
-  if (!raw) return EMPTY_STATE;
+  return parseStoredState(raw);
+}
 
+function parseStoredState(raw: string | null): BackendState {
+  if (!raw) return EMPTY_STATE;
   try {
     const parsed = backendStateSchema.safeParse(JSON.parse(raw));
     if (!parsed.success) return EMPTY_STATE;
     return normalizeActive(parsed.data);
   } catch {
     return EMPTY_STATE;
+  }
+}
+
+function ensureStorageListener(): void {
+  if (storageListenerRegistered || typeof window === "undefined") return;
+  window.addEventListener("storage", handleStorageChange);
+  storageListenerRegistered = true;
+}
+
+function handleStorageChange(event: StorageEvent): void {
+  if (event.key !== STORAGE_KEY && event.key !== null) return;
+  if (!isLocalStorageEvent(event)) return;
+
+  const next = parseStoredState(event.newValue);
+  cache = next;
+  for (const listener of listeners) listener(next);
+}
+
+function isLocalStorageEvent(event: StorageEvent): boolean {
+  if (!event.storageArea) return true;
+  try {
+    return event.storageArea === window.localStorage;
+  } catch {
+    return false;
   }
 }
 
@@ -59,6 +88,7 @@ function normalizeActive(state: BackendState): BackendState {
 }
 
 function commit(next: BackendState): BackendState {
+  ensureStorageListener();
   const normalized = normalizeActive(next);
   cache = normalized;
   try {
@@ -71,6 +101,7 @@ function commit(next: BackendState): BackendState {
 }
 
 export function subscribeBackends(listener: Listener): () => void {
+  ensureStorageListener();
   listeners.add(listener);
   return () => listeners.delete(listener);
 }

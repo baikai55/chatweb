@@ -71,6 +71,31 @@ describe("deriveSessionTitle", () => {
 });
 
 describe("聊天历史持久化失败", () => {
+  it("过滤损坏记录，同时保留旧版纯文本和当前多模态会话", async () => {
+    const oldTextSession = session();
+    const multimodalSession: ChatSession = {
+      ...session(),
+      id: "multimodal",
+      updatedAt: 2,
+      messages: [userMessage([
+        { type: "text", text: "看图" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "auto" } },
+      ])],
+    };
+    idbMocks.getByScope.mockResolvedValueOnce([
+      oldTextSession,
+      { ...session(), id: "missing-messages", messages: undefined },
+      {
+        ...session(),
+        id: "broken-image",
+        messages: [{ id: "broken", role: "user", content: [{ type: "image_url", image_url: {} }] }],
+      },
+      multimodalSession,
+    ]);
+
+    await expect(loadSessions("backend")).resolves.toEqual([multimodalSession, oldTextSession]);
+  });
+
   it("读取失败会向调用方抛出，而不是伪装成空历史", async () => {
     const error = new Error("IndexedDB unavailable");
     idbMocks.getByScope.mockRejectedValueOnce(error);

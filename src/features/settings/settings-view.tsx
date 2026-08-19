@@ -1,5 +1,5 @@
 import { Check, Copy, Download, KeyRound, Loader2, LogOut, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { classifyModel, sortForBrowsing, type CatalogModel } from "@/backends/model-catalog";
@@ -65,6 +65,7 @@ import {
   clearWorkerAccessToken,
   hasWorkerAccessToken,
 } from "@/transport/worker-access";
+import { isAbortError } from "@/transport/errors";
 
 const KIND_LABELS: Record<ModelKind, string> = {
   auto: "自动归类",
@@ -220,7 +221,7 @@ export function SettingsView({
 
 /* ── 联网 ─────────────────────────────────────────────────────────── */
 
-function SearchSettingsSection() {
+export function SearchSettingsSection() {
   const settings = useAppSettings();
   const [provider, setProvider] = useState<SearchProvider>(settings.searchProvider);
   const [apiKey, setApiKey] = useState(settings.searchApiKey);
@@ -228,6 +229,12 @@ function SearchSettingsSection() {
   const [workerPassword, setWorkerPassword] = useState("");
   const [authenticating, setAuthenticating] = useState(false);
   const [workerAuthorized, setWorkerAuthorized] = useState(() => hasWorkerAccessToken());
+  const authAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    authAbortRef.current?.abort();
+    authAbortRef.current = null;
+  }, []);
 
   const normalizedBaseUrl = baseUrl.trim();
   const dirty = provider !== settings.searchProvider
@@ -252,17 +259,25 @@ function SearchSettingsSection() {
 
   async function authorizeWorker(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!workerPassword || authenticating) return;
+    if (!workerPassword || authenticating || authAbortRef.current) return;
+    const controller = new AbortController();
+    authAbortRef.current = controller;
     setAuthenticating(true);
     try {
-      await authenticateWorker(workerPassword);
+      await authenticateWorker(workerPassword, controller.signal);
+      if (authAbortRef.current !== controller) return;
       setWorkerPassword("");
       setWorkerAuthorized(true);
       toast.success("Worker 访问口令已验证");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : String(caught));
+      if (authAbortRef.current === controller && !isAbortError(caught)) {
+        toast.error(caught instanceof Error ? caught.message : String(caught));
+      }
     } finally {
-      setAuthenticating(false);
+      if (authAbortRef.current === controller) {
+        authAbortRef.current = null;
+        setAuthenticating(false);
+      }
     }
   }
 
