@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { createBackend, type Backend } from "@/backends/types";
 import {
+  buildConfiguredTTSOptions,
   buildVoiceCallTTSOptions,
   defaultVoiceCallVoice,
   resolveVoiceCallConfig,
@@ -108,6 +109,10 @@ describe("resolveVoiceCallConfig", () => {
 });
 
 describe("通话 TTS 参数", () => {
+  it("普通回复朗读不强制指定语言", () => {
+    expect(buildConfiguredTTSOptions(connection(), "Hello")).not.toHaveProperty("language");
+  });
+
   it("自定义路由声线优先，并使用中文和原连接参数", () => {
     const controller = new AbortController();
     const ttsConnection = connection({

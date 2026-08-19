@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isAbortError } from "@/transport/errors";
 import { releaseSpeechAudio, synthesizeSpeech, transcribeSpeech, type SpeechAudioResult } from "@/transport/voice";
 import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/voice/audio-file";
+import { unlockAudioElement } from "@/features/voice/browser-audio";
 import {
   VoiceCallRecorder,
   type VoiceCallRecorderResult,
@@ -12,8 +13,6 @@ import {
   type VoiceCallConfig,
 } from "@/features/voice/voice-call-config";
 import type { VoiceCallPhase } from "@/features/voice/voice-call-overlay";
-
-const SILENT_AUDIO_DATA_URL = "data:audio/wav;base64,UklGRnQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
 
 export type VoiceCallAssistantTurnResult = {
   status: "completed" | "aborted" | "failed" | "stale";
@@ -44,7 +43,7 @@ const INITIAL_STATE: VoiceCallState = {
   phase: "preparing",
   elapsedMs: 0,
   muted: false,
-  soundEnabled: false,
+  soundEnabled: true,
   latestUserText: "",
   latestAssistantText: "",
   error: "",
@@ -79,7 +78,7 @@ export function useVoiceCall({
   const startedAtRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mutedRef = useRef(false);
-  const soundEnabledRef = useRef(false);
+  const soundEnabledRef = useRef(true);
 
   const patchState = useCallback((patch: Partial<VoiceCallState>) => {
     const next = { ...stateRef.current, ...patch };
@@ -303,7 +302,7 @@ export function useVoiceCall({
     const sequence = callSequenceRef.current + 1;
     callSequenceRef.current = sequence;
     mutedRef.current = false;
-    soundEnabledRef.current = false;
+    soundEnabledRef.current = true;
     startedAtRef.current = Date.now();
     const audio = new Audio();
     audio.preload = "auto";
@@ -333,7 +332,7 @@ export function useVoiceCall({
     if (!stateRef.current.open) return;
     cleanupActiveCall(true);
     mutedRef.current = false;
-    soundEnabledRef.current = false;
+    soundEnabledRef.current = true;
     setState(INITIAL_STATE);
     stateRef.current = INITIAL_STATE;
   }, [cleanupActiveCall]);
@@ -438,22 +437,4 @@ export function useVoiceCall({
     retry,
     finishSpeaking,
   };
-}
-
-/** 在“开始通话”的点击手势里预播放极短静音，解锁后续异步 TTS 的同一音频元素。 */
-function unlockAudioElement(audio: HTMLAudioElement): void {
-  audio.muted = true;
-  audio.src = SILENT_AUDIO_DATA_URL;
-  void audio.play().then(() => {
-    if (audio.src !== SILENT_AUDIO_DATA_URL) return;
-    audio.pause();
-    audio.currentTime = 0;
-    audio.removeAttribute("src");
-    audio.muted = false;
-  }).catch(() => {
-    // 个别浏览器连静音 data URL 也不接受，真实播放时仍有错误态的手动重试兜底。
-    if (audio.src !== SILENT_AUDIO_DATA_URL) return;
-    audio.removeAttribute("src");
-    audio.muted = false;
-  });
 }

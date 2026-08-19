@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, Phone, RefreshCw, Square, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
+import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, Phone, RefreshCw, Square, Trash2, TriangleAlert, Volume2, VolumeX, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -31,6 +31,7 @@ import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { resolveVoiceCallConfig } from "@/features/voice/voice-call-config";
 import { VoiceCallMiniWindow, VoiceCallOverlay } from "@/features/voice/voice-call-overlay";
+import { useChatReplySpeech, type ChatReplySpeechPhase } from "@/features/voice/use-chat-reply-speech";
 import { useVoiceCall } from "@/features/voice/use-voice-call";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { cn } from "@/shared/lib/cn";
@@ -135,6 +136,10 @@ export function ChatPanel({
   const streamSnapshotRef = useRef<ChatStreamSnapshot | null>(null);
   const requestSequenceRef = useRef(0);
   const sttSequenceRef = useRef(0);
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const pendingImagesRef = useRef(pendingImages);
+  pendingImagesRef.current = pendingImages;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const voiceCallButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -192,6 +197,11 @@ export function ChatPanel({
     chatModel: model,
     sttConnection,
     ttsConnection,
+  });
+  const chatReplySpeech = useChatReplySpeech({
+    connection: ttsConnection,
+    contextKey: `${backend.id}:${session.id}`,
+    onError: (message) => toast.error(`回复朗读失败：${message}`),
   });
   const voiceCall = useVoiceCall({
     config: voiceCallConfig,
@@ -326,6 +336,7 @@ export function ChatPanel({
   function handleRecorderPhaseChange(phase: RecorderPhase) {
     setRecorderPhase(phase);
     if (phase !== "idle") {
+      chatReplySpeech.stop();
       setVoiceStatus("");
       setVoiceError("");
     }
@@ -402,10 +413,21 @@ export function ChatPanel({
 
       const transcription = result.text.trim();
       if (!transcription) throw new Error("语音识别没有返回文字");
-      setInput((current) => appendTranscriptionToDraft(current, transcription));
+      if (sttAbortRef.current === controller) sttAbortRef.current = null;
+      setTranscribing(false);
+      if (
+        inputRef.current.trim()
+        || pendingImagesRef.current.length > 0
+        || readingImageStatsRef.current.count > 0
+      ) {
+        setInput((current) => appendTranscriptionToDraft(current, transcription));
+        setVoiceInputMode(false);
+        setVoiceStatus("已有草稿或图片，语音已填入输入框，请确认后发送");
+        requestAnimationFrame(() => textareaRef.current?.focus());
+        return;
+      }
       setVoiceStatus("");
-      setVoiceInputMode(false);
-      requestAnimationFrame(() => textareaRef.current?.focus());
+      void sendTranscribedTurn(transcription, targetSessionId);
     } catch (caught) {
       if (!isCurrent()) return;
       setVoiceStatus("");
@@ -536,6 +558,54 @@ export function ChatPanel({
     return send(messages, base, { notify: false });
   }
 
+  async function sendTranscribedTurn(text: string, targetSessionId: string) {
+    if (currentSessionIdRef.current !== targetSessionId || voiceCall.state.open) return;
+    if (abortRef.current) {
+      setVoiceError("当前回复结束后才能发送语音");
+      return;
+    }
+
+    const transcription = text.trim();
+    if (!transcription) return;
+    const current = latestSessionRef.current;
+    const effectiveModel = models.some((item) => item.id === current.model)
+      ? current.model
+      : models[0]?.id ?? "";
+    if (!effectiveModel) {
+      setVoiceError("请先选择聊天模型");
+      return;
+    }
+
+    const userMessage: ConversationMessage = {
+      id: createMessageId(),
+      role: "user",
+      content: transcription,
+    };
+    const messages = [...current.messages, userMessage];
+    const base: ChatSession = {
+      ...current,
+      model: effectiveModel,
+      messages,
+      updatedAt: Date.now(),
+    };
+    commitSession(base);
+    const outcome = await send(messages, base);
+    speakCompletedChatReply(outcome);
+  }
+
+  function speakCompletedChatReply(outcome: SendOutcome) {
+    if (outcome.status === "completed" && outcome.text.trim()) {
+      void chatReplySpeech.speak(outcome.text);
+    }
+  }
+
+  function toggleChatReplySpeech() {
+    const result = chatReplySpeech.toggle();
+    if (result.ok) return;
+    toast.error(result.reason);
+    onManage();
+  }
+
   function startVoiceCall() {
     if (voiceCall.state.open) {
       setVoiceCallExpanded(true);
@@ -545,6 +615,7 @@ export function ChatPanel({
       toast.error("请等当前录音或回复结束后再开始通话");
       return;
     }
+    chatReplySpeech.stop();
     const result = voiceCall.start();
     if (result.ok) {
       setVoiceCallExpanded(true);
@@ -581,9 +652,10 @@ export function ChatPanel({
     const base = { ...session, model, messages, updatedAt: Date.now() };
     if (settings.clearInputAfterSubmit) setInput("");
     setPendingImages([]);
+    chatReplySpeech.stop();
     // 先落盘再请求：发送后的图片立即可见，首个响应片段前停止也不会丢消息。
     commitSession(base);
-    void send(messages, base);
+    void send(messages, base).then(speakCompletedChatReply);
   }
 
   /**
@@ -636,7 +708,8 @@ export function ChatPanel({
     const kept = session.messages.slice(0, target.role === "user" ? index + 1 : index);
     if (kept.length === 0) return;
     const base = { ...session, model };
-    void send(kept, base);
+    chatReplySpeech.stop();
+    void send(kept, base).then(speakCompletedChatReply);
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -851,6 +924,12 @@ export function ChatPanel({
                     containerClassName="min-w-0 flex-1"
                   />
                 )}
+                <ReplySpeechToggle
+                  enabled={chatReplySpeech.enabled}
+                  phase={chatReplySpeech.phase}
+                  disabled={voiceCall.state.open}
+                  onToggle={toggleChatReplySpeech}
+                />
               </>
             ) : (
               <>
@@ -924,6 +1003,12 @@ export function ChatPanel({
                   disabled={models.length === 0 || voiceCall.state.open}
                   className="max-h-40 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
                 />
+                <ReplySpeechToggle
+                  enabled={chatReplySpeech.enabled}
+                  phase={chatReplySpeech.phase}
+                  disabled={voiceCall.state.open}
+                  onToggle={toggleChatReplySpeech}
+                />
                 {streaming ? (
                   <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
                     <Square className="size-3.5 fill-current" />
@@ -992,6 +1077,41 @@ export function ChatPanel({
         onEnd={endVoiceCall}
       />
     </div>
+  );
+}
+
+function ReplySpeechToggle({
+  enabled,
+  phase,
+  disabled,
+  onToggle,
+}: {
+  enabled: boolean;
+  phase: ChatReplySpeechPhase;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  const label = enabled ? "自动朗读回复：已开启" : "自动朗读回复：已关闭";
+  const Icon = enabled ? Volume2 : VolumeX;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant={enabled ? "secondary" : "ghost"}
+          size="icon"
+          className="size-9 shrink-0 rounded-full text-muted-foreground"
+          aria-label={label}
+          aria-pressed={enabled}
+          disabled={disabled}
+          onClick={onToggle}
+        >
+          <Icon className={cn("size-4", enabled && phase !== "idle" && "animate-pulse")} />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

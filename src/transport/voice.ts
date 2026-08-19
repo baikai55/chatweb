@@ -52,7 +52,7 @@ export type SynthesizeSpeechOptions = {
   model: string;
   text: string;
   voiceId: string;
-  language: string;
+  language?: string;
   /** 省略时保持原有 grok2api `/tts` 行为。 */
   protocol?: ResolvedVoiceProtocol;
   /** 有值时使用用户创建的 TTS 模板，不再调用 protocol 对应的内置端点。 */

@@ -63,6 +63,18 @@ export function buildVoiceCallTTSOptions(
   text: string,
   signal?: AbortSignal,
 ): SynthesizeSpeechOptions {
+  return buildConfiguredTTSOptions(connection, text, {
+    signal,
+    language: VOICE_CALL_LANGUAGE,
+  });
+}
+
+/** 普通回复和实时通话共用同一连接边界，调用方自行决定是否指定语言。 */
+export function buildConfiguredTTSOptions(
+  connection: VoiceConnection,
+  text: string,
+  options: { signal?: AbortSignal; language?: string } = {},
+): SynthesizeSpeechOptions {
   const issue = voiceConnectionIssue(connection, "语音合成");
   if (issue) throw new Error(issue);
 
@@ -77,9 +89,9 @@ export function buildVoiceCallTTSOptions(
     model: connection.model.trim(),
     text: prompt,
     voiceId: defaultVoiceCallVoice(connection),
-    language: VOICE_CALL_LANGUAGE,
     speed: 1,
-    ...(signal ? { signal } : {}),
+    ...(options.language ? { language: options.language } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   };
 }
 
