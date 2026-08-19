@@ -22,7 +22,7 @@ import { isAbortError } from "@/transport/errors";
 import { transcribeSpeech } from "@/transport/voice";
 import { resolveVoiceConnection } from "@/transport/voice-routing";
 import { readChatContentText, type ChatContentPart, type ChatMessageContent, type ChatStreamSnapshot, type ReasoningEffort } from "@/transport/types";
-import { createMessageId, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
+import { createMessageId, mergeSessionMessages, type ChatSession, type ConversationMessage } from "@/features/console/chat-store";
 import { appendTranscriptionToDraft } from "@/features/console/chat-voice-input";
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
@@ -488,18 +488,17 @@ export function ChatPanel({
       });
 
       if (!isCurrentRequest()) return { status: "stale", text: "" };
-      const committed: ChatSession = {
-        ...base,
-        messages: [...messages, {
+      const committed = mergeSessionMessages(base, latestSessionRef.current, [
+        ...messages,
+        {
           id: createMessageId(),
           role: "assistant",
           content: result.text,
           reasoning: result.reasoning || undefined,
           tools: result.tools.length > 0 ? result.tools : undefined,
           nativeFinishReason: result.nativeFinishReason,
-        }],
-        updatedAt: Date.now(),
-      };
+        },
+      ]);
       commitSession(committed);
       if (options.notify !== false) notifyTaskDone("回复完成", result.text.slice(0, 120) || base.model);
       return { status: "completed", text: result.text };
@@ -509,28 +508,27 @@ export function ChatPanel({
       if (isAbortError(caught)) {
         const snapshot = streamSnapshotRef.current;
         if (snapshot && (snapshot.text || snapshot.reasoning)) {
-          commitSession({
-            ...base,
-            messages: [...messages, {
+          commitSession(mergeSessionMessages(base, latestSessionRef.current, [
+            ...messages,
+            {
               id: createMessageId(),
               role: "assistant",
               content: snapshot.text,
               reasoning: snapshot.reasoning || undefined,
               tools: snapshot.tools.length > 0 ? snapshot.tools : undefined,
               nativeFinishReason: snapshot.nativeFinishReason,
-            }],
-            updatedAt: Date.now(),
-          });
+            },
+          ]));
         } else {
           // `submit` 已经先落过用户消息；重新生成被停止时则在这里保留截断后的上下文。
-          commitSession({ ...base, messages, updatedAt: Date.now() });
+          commitSession(mergeSessionMessages(base, latestSessionRef.current, messages));
         }
         return { status: "aborted", text: snapshot?.text ?? "" };
       }
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
       // 用户消息也要留住，否则报错后输入的内容就白打了
-      commitSession({ ...base, messages, updatedAt: Date.now() });
+      commitSession(mergeSessionMessages(base, latestSessionRef.current, messages));
       return { status: "failed", text: "", error: message };
     } finally {
       if (requestSequenceRef.current === sequence) {
@@ -739,7 +737,7 @@ export function ChatPanel({
           <ModelPicker
             models={models}
             value={model}
-            onChange={(id) => onCommit({ ...session, model: id })}
+            onChange={(id) => commitSession({ ...latestSessionRef.current, model: id })}
             onManage={onManage}
           />
 
@@ -752,7 +750,10 @@ export function ChatPanel({
           */}
           <Select
             value={session.reasoningEffort}
-            onValueChange={(value) => onCommit({ ...session, reasoningEffort: value as ReasoningEffort })}
+            onValueChange={(value) => commitSession({
+              ...latestSessionRef.current,
+              reasoningEffort: value as ReasoningEffort,
+            })}
           >
             <SelectTrigger
               className={cn(
@@ -773,7 +774,10 @@ export function ChatPanel({
           <WebSearchToggle
             enabled={session.webSearch}
             note={search}
-            onToggle={() => onCommit({ ...session, webSearch: !session.webSearch })}
+            onToggle={() => commitSession({
+              ...latestSessionRef.current,
+              webSearch: !latestSessionRef.current.webSearch,
+            })}
           />
         </div>
 

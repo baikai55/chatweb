@@ -4,6 +4,7 @@ import {
   deleteSession,
   deriveSessionTitle,
   loadSessions,
+  mergeSessionMessages,
   saveSession,
   type ChatSession,
   type ConversationMessage,
@@ -96,6 +97,40 @@ describe("聊天历史持久化失败", () => {
       ok: false,
       operation: "delete",
       error,
+    });
+  });
+});
+
+describe("流式回复合并", () => {
+  it("保留请求期间修改的模型、推理和联网偏好", () => {
+    const base = session();
+    const latest: ChatSession = {
+      ...base,
+      model: "new-model",
+      reasoningEffort: "high",
+      webSearch: true,
+      title: "最新标题",
+    };
+    const assistant: ConversationMessage = {
+      id: "m_assistant",
+      role: "assistant",
+      content: "完成",
+    };
+
+    expect(mergeSessionMessages(base, latest, [...base.messages, assistant], 99)).toEqual({
+      ...latest,
+      messages: [...base.messages, assistant],
+      updatedAt: 99,
+    });
+  });
+
+  it("latest 已切到其它会话时不会串用它的偏好", () => {
+    const base = session();
+    const other = { ...base, id: "other", model: "other-model" };
+
+    expect(mergeSessionMessages(base, other, base.messages, 99)).toEqual({
+      ...base,
+      updatedAt: 99,
     });
   });
 });

@@ -67,7 +67,12 @@ export async function* readSSE(response: Response, options: SSEOptions = {}): As
 
       buffer += decoder.decode(value, { stream: !done });
       // 统一换行，SSE 规范允许 \r\n / \r / \n 三种
-      buffer = buffer.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+      // 网络分块可以恰好切在 CR 和 LF 之间。流还没结束时先保留末尾孤立的 CR，
+      // 否则这一轮把 CR 变成 LF、下一轮再拼入 LF，会凭空造出一个帧边界。
+      const trailingCR = !done && buffer.endsWith("\r");
+      const complete = trailingCR ? buffer.slice(0, -1) : buffer;
+      buffer = complete.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
+        + (trailingCR ? "\r" : "");
 
       if (buffer.length > maxBufferBytes) {
         throw new TransportError(response.status, `上游单帧超过 ${Math.round(maxBufferBytes / 1024 / 1024)}MB，已中断`);

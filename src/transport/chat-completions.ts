@@ -87,13 +87,15 @@ async function requestChatCompletionStep(
   const request = createRequestTimeoutScope(options.signal);
 
   try {
+    const headers = new Headers({
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+    });
+    const apiKey = options.apiKey.trim();
+    if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
     const response = await request.run(() => fetch(joinURL(options.baseURL, "/chat/completions"), {
       method: "POST",
-      headers: new Headers({
-        Accept: "text/event-stream",
-        Authorization: `Bearer ${options.apiKey}`,
-        "Content-Type": "application/json",
-      }),
+      headers,
       body: JSON.stringify(body),
       signal: request.signal,
     }), timeoutMs, "连接聊天接口");

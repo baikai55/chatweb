@@ -71,6 +71,20 @@ gzip 234 KB。入口仍超过 500 KB，后续需继续拆聊天和共享传输�
 （1 个核心流程）、`pnpm build`、`pnpm audit --audit-level moderate`、`git diff --check`
 均通过。生产入口仍约 517 KB / gzip 161 KB，测试依赖没有进入浏览器产物。
 
+### 第五轮已完成
+
+1. **SSE 分块边界**：CRLF 恰好被网络 chunk 拆开时不再被误判为两个换行，避免多行
+   `data:` 帧被提前截断后丢失流式回复。
+2. **无密钥后端兼容**：聊天 API Key 为空或只有空格时不再发送空的 `Bearer` 头，和模型、
+   语音请求保持一致，匿名 OpenAI-compatible 服务不会被无效认证头误伤。
+3. **流式期间保留偏好**：回复完成、中止或失败时只合并本次消息，保留用户期间修改的模型、
+   推理档位和联网开关；控件无需在生成期间禁用。
+
+三项都有本地回归测试，不访问真实上游。最终验证：`pnpm check`、`pnpm test`（37 个文件、
+321 个用例）、Playwright Chromium（1 个核心流程，含流式期间修改推理档位）、`pnpm build`、
+`pnpm audit --audit-level moderate`、`git diff --check` 均通过；生产入口约 517 KB /
+gzip 162 KB。
+
 ### 后续仍需处理
 
 1. proxy 的持久化配额与前端 proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。

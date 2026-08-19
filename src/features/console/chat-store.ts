@@ -161,3 +161,17 @@ export function upsertSession(sessions: ChatSession[], session: ChatSession): Ch
   if (index < 0) return [session, ...sessions];
   return sessions.map((item, i) => (i === index ? session : item));
 }
+
+/**
+ * 请求完成时只用请求结果替换消息，保留流式期间修改过的会话偏好。
+ * latest 指向别的会话时退回请求起点，避免把两个会话拼在一起。
+ */
+export function mergeSessionMessages(
+  base: ChatSession,
+  latest: ChatSession,
+  messages: ConversationMessage[],
+  updatedAt = Date.now(),
+): ChatSession {
+  const shell = latest.id === base.id ? latest : base;
+  return { ...shell, messages, updatedAt };
+}

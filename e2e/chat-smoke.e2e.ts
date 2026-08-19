@@ -7,6 +7,10 @@ test("添加后端、保存模型并完成一次流式聊天", async ({ page }) 
   const unexpectedRequests: string[] = [];
   const browserErrors: string[] = [];
   let chatRequest: Record<string, unknown> | null = null;
+  let releaseChatResponse!: () => void;
+  const chatResponseGate = new Promise<void>((resolve) => {
+    releaseChatResponse = resolve;
+  });
 
   page.on("console", (message: ConsoleMessage) => {
     if (message.type() === "error") browserErrors.push(message.text());
@@ -43,6 +47,7 @@ test("添加后端、保存模型并完成一次流式聊天", async ({ page }) 
 
     if (url.pathname === "/__mock__/v1/chat/completions") {
       chatRequest = request.postDataJSON() as Record<string, unknown>;
+      await chatResponseGate;
       await route.fulfill({
         status: 200,
         headers: {
@@ -101,9 +106,16 @@ test("添加后端、保存模型并完成一次流式聊天", async ({ page }) 
   await page.getByPlaceholder("说点什么…").fill("浏览器冒烟测试");
   await page.getByRole("button", { name: "发送" }).click();
 
+  await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible();
+  const reasoningSelect = page.locator("main").getByRole("combobox");
+  await reasoningSelect.click();
+  await page.getByRole("option", { name: "high", exact: true }).click();
+  releaseChatResponse();
+
   const messages = page.getByRole("region", { name: "Messages" });
   await expect(messages.getByText("浏览器冒烟测试", { exact: true })).toBeVisible();
   await expect(messages.getByText("你好，已收到。", { exact: true })).toBeVisible();
+  await expect(reasoningSelect).toContainText("high");
   expect(chatRequest).toMatchObject({
     model: "mock-chat",
     stream: true,

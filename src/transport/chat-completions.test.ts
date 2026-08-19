@@ -30,6 +30,21 @@ function options(patch: Partial<ChatCompletionsOptions> = {}): ChatCompletionsOp
   };
 }
 
+describe("聊天请求头", () => {
+  it("空 API Key 不发送空 Bearer 认证头", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ content: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamChatCompletions(options({ apiKey: "   " })))
+      .resolves.toMatchObject({ text: "ok" });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const headers = new Headers(init?.headers);
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.get("content-type")).toBe("application/json");
+  });
+});
+
 describe("webSearchNote", () => {
   it("认得出的模型说清会发什么形状", () => {
     expect(webSearchNote("gemini-2.5-pro")).toMatchObject({ known: true });
