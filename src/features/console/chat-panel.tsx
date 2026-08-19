@@ -1,5 +1,5 @@
 import { ArrowUp, BrainCircuit, Copy, Globe, ImagePlus, Keyboard, Loader2, Mic, Phone, RefreshCw, Square, Trash2, TriangleAlert, Volume2, VolumeX, Wrench, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -27,10 +27,8 @@ import { appendTranscriptionToDraft } from "@/features/console/chat-voice-input"
 import { renderAssistantMarkup } from "@/features/console/markdown";
 import { ModelPicker } from "@/features/console/model-picker";
 import { prepareRecordedSTTAudioFile, validateSTTAudioFile } from "@/features/voice/audio-file";
-import { AudioRecorderButton } from "@/features/voice/audio-recorder-button";
 import type { AudioRecorderError, RecordedAudio, RecorderPhase } from "@/features/voice/browser-recorder";
 import { resolveVoiceCallConfig } from "@/features/voice/voice-call-config";
-import { VoiceCallMiniWindow, VoiceCallOverlay } from "@/features/voice/voice-call-overlay";
 import { useChatReplySpeech, type ChatReplySpeechPhase } from "@/features/voice/use-chat-reply-speech";
 import { useVoiceCall } from "@/features/voice/use-voice-call";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
@@ -41,6 +39,10 @@ import {
   readImageInputFile,
   type ImageInputFile,
 } from "@/shared/image-input";
+
+const AudioRecorderButton = lazy(() => import("@/features/voice/audio-recorder-button").then((module) => ({ default: module.AudioRecorderButton })));
+const VoiceCallOverlay = lazy(() => import("@/features/voice/voice-call-overlay").then((module) => ({ default: module.VoiceCallOverlay })));
+const VoiceCallMiniWindow = lazy(() => import("@/features/voice/voice-call-overlay").then((module) => ({ default: module.VoiceCallMiniWindow })));
 
 const REASONING_LEVELS: ReasoningEffort[] = ["auto", "none", "low", "medium", "high", "xhigh"];
 
@@ -912,17 +914,19 @@ export function ChatPanel({
                     正在识别，点击取消
                   </Button>
                 ) : (
-                  <AudioRecorderButton
-                    key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
-                    wide
-                    disabled={voiceCall.state.open || models.length === 0 || streaming !== null}
-                    disabledReason={streaming ? "回复完成后才能录音" : undefined}
-                    onPhaseChange={handleRecorderPhaseChange}
-                    onRecorded={(recording) => { void transcribeRecording(recording); }}
-                    onError={handleRecorderError}
-                    className="border bg-secondary/55 text-foreground"
-                    containerClassName="min-w-0 flex-1"
-                  />
+                  <Suspense fallback={<Loader2 className="mx-auto size-4 animate-spin text-muted-foreground" />}>
+                    <AudioRecorderButton
+                      key={`${backend.id}:${session.id}:${sttConnection.targetBackendId}:${sttConnection.baseURL}:${sttConnection.protocol}:${chatInputSTTModel}`}
+                      wide
+                      disabled={voiceCall.state.open || models.length === 0 || streaming !== null}
+                      disabledReason={streaming ? "回复完成后才能录音" : undefined}
+                      onPhaseChange={handleRecorderPhaseChange}
+                      onRecorded={(recording) => { void transcribeRecording(recording); }}
+                      onError={handleRecorderError}
+                      className="border bg-secondary/55 text-foreground"
+                      containerClassName="min-w-0 flex-1"
+                    />
+                  </Suspense>
                 )}
                 <ReplySpeechToggle
                   enabled={chatReplySpeech.enabled}
@@ -1047,35 +1051,37 @@ export function ChatPanel({
       </form>
       </div>
 
-      <VoiceCallOverlay
-        open={voiceCall.state.open && voiceCallExpanded}
-        phase={voiceCall.state.phase}
-        modelName={activeModel?.displayName || model}
-        elapsedMs={voiceCall.state.elapsedMs}
-        muted={voiceCall.state.muted}
-        soundEnabled={voiceCall.state.soundEnabled}
-        latestUserText={voiceCall.state.latestUserText}
-        latestAssistantText={voiceCall.state.latestAssistantText}
-        error={voiceCall.state.error}
-        onMinimize={minimizeVoiceCall}
-        onToggleMute={voiceCall.toggleMute}
-        onToggleSound={voiceCall.toggleSound}
-        onInterrupt={voiceCall.interrupt}
-        onFinishSpeaking={voiceCall.finishSpeaking}
-        onRetry={voiceCall.retry}
-        onEnd={endVoiceCall}
-      />
+      <Suspense fallback={null}>
+        <VoiceCallOverlay
+          open={voiceCall.state.open && voiceCallExpanded}
+          phase={voiceCall.state.phase}
+          modelName={activeModel?.displayName || model}
+          elapsedMs={voiceCall.state.elapsedMs}
+          muted={voiceCall.state.muted}
+          soundEnabled={voiceCall.state.soundEnabled}
+          latestUserText={voiceCall.state.latestUserText}
+          latestAssistantText={voiceCall.state.latestAssistantText}
+          error={voiceCall.state.error}
+          onMinimize={minimizeVoiceCall}
+          onToggleMute={voiceCall.toggleMute}
+          onToggleSound={voiceCall.toggleSound}
+          onInterrupt={voiceCall.interrupt}
+          onFinishSpeaking={voiceCall.finishSpeaking}
+          onRetry={voiceCall.retry}
+          onEnd={endVoiceCall}
+        />
 
-      <VoiceCallMiniWindow
-        open={voiceCall.state.open && !voiceCallExpanded}
-        phase={voiceCall.state.phase}
-        modelName={activeModel?.displayName || model}
-        elapsedMs={voiceCall.state.elapsedMs}
-        muted={voiceCall.state.muted}
-        error={voiceCall.state.error}
-        onExpand={expandVoiceCall}
-        onEnd={endVoiceCall}
-      />
+        <VoiceCallMiniWindow
+          open={voiceCall.state.open && !voiceCallExpanded}
+          phase={voiceCall.state.phase}
+          modelName={activeModel?.displayName || model}
+          elapsedMs={voiceCall.state.elapsedMs}
+          muted={voiceCall.state.muted}
+          error={voiceCall.state.error}
+          onExpand={expandVoiceCall}
+          onEnd={endVoiceCall}
+        />
+      </Suspense>
     </div>
   );
 }

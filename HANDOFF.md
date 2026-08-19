@@ -47,10 +47,22 @@ gzip 234 KB。入口仍超过 500 KB，后续需继续拆聊天和共享传输�
 `pnpm build`、`pnpm audit --audit-level moderate`、`git diff --check` 均通过。构建仍只有
 主聊天包超过 500 KB 的已知提示。
 
+### 第三轮已完成
+
+1. **聊天首屏继续拆分**：录音按钮和语音通话浮层改为真正按需加载，聊天保持首屏可用；
+   生产入口从约 753 KB / gzip 235 KB 降到约 517 KB / gzip 161 KB。语音输入/通话的
+   业务 hook 和传输仍随聊天入口加载，后续只有在能保持 hook 生命周期正确时再继续拆。
+2. **服务端代理白名单**：`/__api/proxy/*` 现在只接受已声明的 models、chat、图片、
+   音视频和视频状态端点，校验 HTTP 方法、JSON/multipart 类型和请求体上限，并在未知
+   `Content-Length` 时按实际流入字节限制；搜索/上传的个人匿名同源开关不受影响。
+
+最终验证：`pnpm check`、`pnpm test`（36 个文件、317 个用例）、`pnpm build`、
+`git diff --check` 均通过。构建仍只有主聊天包超过 500 KB 的提示。
+
 ### 后续仍需处理
 
-1. `/__api/auth` 增加部署层或持久化的限流/失败退避；proxy 增加路径、方法、请求体和
-   配额白名单。前端 proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
+1. `/__api/auth` 增加部署层或持久化的限流/失败退避，以及 proxy 的持久化配额；前端
+   proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
 2. Markdown 已补基础 XSS 回归；后续继续扩充浏览器差异与 mXSS 语料，保持无第三方
    脚本，评估 Trusted Types，并尽量收窄 CSP `connect-src`。
 3. 增加 Playwright 自动化冒烟，覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限、

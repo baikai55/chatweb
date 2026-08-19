@@ -11,7 +11,7 @@ import {
   type Env,
 } from "./auth";
 import { BodyTooLargeError, InvalidJsonBodyError, readJsonBodyWithLimit } from "./body";
-import { handleProxy } from "./proxy";
+import { handleProxy, ProxyBodyTooLargeError } from "./proxy";
 import { handleSearch } from "./search";
 import { handleMediaRead, handleUpload, json } from "./upload";
 
@@ -38,6 +38,9 @@ export default {
       try {
         return await handleApi(request, env, url);
       } catch (error) {
+        if (error instanceof ProxyBodyTooLargeError) {
+          return json({ error: error.message }, 413);
+        }
         const message = error instanceof Error ? error.message : "未知错误";
         return json({ error: message }, 500);
       }

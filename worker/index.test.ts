@@ -170,6 +170,88 @@ describe("Worker 访问控制", () => {
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer upstream-key");
   });
 
+  it("proxy 只允许已声明的端点、方法和请求体类型", async () => {
+    const env = makeEnv({
+      ACCESS_PASSWORD: "password",
+      TOKEN_SECRET: "a-long-token-secret",
+      UPSTREAM_BASE_URL: "https://upstream.example/v1",
+      UPSTREAM_API_KEY: "upstream-key",
+    });
+    const fetchMock = vi.fn(async () => new Response("ok", {
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const token = await issueToken(env, Math.floor(Date.now() / 1000));
+    const authorization = { Authorization: `Bearer ${token}` };
+
+    const unknownPath = await worker.fetch(new Request("https://chat.example/__api/proxy/admin/config", {
+      headers: authorization,
+    }), env);
+    const wrongMethod = await worker.fetch(new Request("https://chat.example/__api/proxy/models", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "application/json" },
+      body: "{}",
+    }), env);
+    const wrongContentType = await worker.fetch(new Request("https://chat.example/__api/proxy/chat/completions", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "text/plain" },
+      body: "{}",
+    }), env);
+    const oversizedJSON = await worker.fetch(new Request("https://chat.example/__api/proxy/chat/completions", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "application/json", "content-length": String(2 * 1024 * 1024 + 1) },
+      body: "{}",
+    }), env);
+    const allowed = await worker.fetch(new Request("https://chat.example/__api/proxy/chat/completions", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({ model: "test", messages: [] }),
+    }), env);
+
+    expect(unknownPath.status).toBe(403);
+    expect(wrongMethod.status).toBe(400);
+    expect(wrongContentType.status).toBe(400);
+    expect(oversizedJSON.status).toBe(400);
+    expect(allowed.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("proxy 在缺失 Content-Length 时也会按实际流入字节截断请求体", async () => {
+    const env = makeEnv({
+      ACCESS_PASSWORD: "password",
+      TOKEN_SECRET: "a-long-token-secret",
+      UPSTREAM_BASE_URL: "https://upstream.example/v1",
+      UPSTREAM_API_KEY: "upstream-key",
+    });
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.body) await new Response(init.body as BodyInit).arrayBuffer();
+      return Response.json({ ok: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const token = await issueToken(env, Math.floor(Date.now() / 1000));
+    const bytes = new Uint8Array(2 * 1024 * 1024 + 1);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+
+    const response = await worker.fetch(new Request("https://chat.example/__api/proxy/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit), env);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("超过大小上限") });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("上传在缺失 Content-Length 时按实际流入字节执行硬上限", async () => {
     const put = vi.fn();
     const env = makeEnv({

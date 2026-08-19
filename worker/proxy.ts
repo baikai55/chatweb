@@ -27,11 +27,46 @@ const FORWARD_RESPONSE_HEADERS = new Set([
   "x-request-id",
 ]);
 
+const MAX_PROXY_JSON_BYTES = 2 * 1024 * 1024;
+const MAX_PROXY_MEDIA_BYTES = 100 * 1024 * 1024;
+
+type ProxyRoute = {
+  methods: ReadonlySet<string>;
+  contentType: "json" | "multipart" | "none";
+  maxBodyBytes: number;
+};
+
+export class ProxyBodyTooLargeError extends Error {
+  constructor() {
+    super("代理请求体超过大小上限");
+    this.name = "ProxyBodyTooLargeError";
+  }
+}
+
+const PROXY_ROUTES: Array<{ pattern: RegExp; route: ProxyRoute }> = [
+  { pattern: /^models$/, route: route(["GET"], "none", 0) },
+  { pattern: /^tts\/voices$/, route: route(["GET"], "none", 0) },
+  { pattern: /^(?:chat\/completions|images\/generations|audio\/speech|tts|videos\/(?:generations|edits|extensions))$/, route: route(["POST"], "json", MAX_PROXY_JSON_BYTES) },
+  { pattern: /^(?:audio\/transcriptions|stt|images\/edits)$/, route: route(["POST"], "multipart", MAX_PROXY_MEDIA_BYTES) },
+  { pattern: /^videos\/[A-Za-z0-9._~-]+$/, route: route(["GET"], "none", 0) },
+];
+
+function route(methods: string[], contentType: ProxyRoute["contentType"], maxBodyBytes: number): ProxyRoute {
+  return { methods: new Set(methods), contentType, maxBodyBytes };
+}
+
 export async function handleProxy(request: Request, env: Env, subPath: string): Promise<Response> {
   const upstreamBase = (env.UPSTREAM_BASE_URL ?? "").replace(/\/+$/, "");
   if (!upstreamBase || !env.UPSTREAM_API_KEY) {
     return json({ error: "服务端没有配置上游后端" }, 501);
   }
+
+  const routeDefinition = matchProxyRoute(subPath);
+  if (!routeDefinition) {
+    return json({ error: "代理不允许访问这个上游端点" }, 403);
+  }
+  const routeError = validateProxyRequest(request, routeDefinition);
+  if (routeError) return json({ error: routeError }, 400);
 
   const target = buildTargetURL(upstreamBase, subPath, new URL(request.url).search);
   if (!target) {
@@ -48,7 +83,9 @@ export async function handleProxy(request: Request, env: Env, subPath: string): 
   const upstream = await fetch(target, {
     method: request.method,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    body: request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : limitRequestBody(request.body, routeDefinition.maxBodyBytes),
     // 转发流式请求体（上传大文件）时需要
     ...(request.body ? { duplex: "half" } : {}),
   } as RequestInit);
@@ -68,6 +105,59 @@ export async function handleProxy(request: Request, env: Env, subPath: string): 
     status: upstream.status,
     statusText: upstream.statusText,
     headers: responseHeaders,
+  });
+}
+
+function matchProxyRoute(subPath: string): ProxyRoute | null {
+  const clean = subPath.replace(/^\/+/, "").split("?", 1)[0];
+  return PROXY_ROUTES.find((candidate) => candidate.pattern.test(clean))?.route ?? null;
+}
+
+function validateProxyRequest(request: Request, routeDefinition: ProxyRoute): string | null {
+  if (!routeDefinition.methods.has(request.method)) return "代理端点不支持这个 HTTP 方法";
+  if (routeDefinition.contentType === "none") {
+    if (request.body) return "这个代理端点不接受请求体";
+    return null;
+  }
+
+  const contentType = request.headers.get("Content-Type")?.toLowerCase() ?? "";
+  const expected = routeDefinition.contentType === "json" ? "application/json" : "multipart/form-data";
+  if (!contentType.startsWith(expected)) return `代理端点需要 ${expected} 请求体`;
+
+  const declaredLength = request.headers.get("Content-Length");
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > routeDefinition.maxBodyBytes) {
+    return `代理请求体超过 ${Math.round(routeDefinition.maxBodyBytes / 1024 / 1024)}MB 上限`;
+  }
+  return null;
+}
+
+/** 保持流式转发，同时在未知 Content-Length 时按实际字节数截断请求体。 */
+function limitRequestBody(body: ReadableStream<Uint8Array> | null, maxBytes: number): ReadableStream<Uint8Array> | null {
+  if (!body) return null;
+  const reader = body.getReader();
+  let totalBytes = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel();
+          controller.error(new ProxyBodyTooLargeError());
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
   });
 }
 
