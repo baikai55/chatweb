@@ -5,6 +5,7 @@ import type { ChatCompletionsOptions } from "@/transport/chat-completions";
 import { readChatContentText } from "@/transport/types";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -478,5 +479,46 @@ describe("function web_search 调用循环", () => {
     controller.abort();
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("请求超时", () => {
+  it("聊天接口建连卡住时抛出 TimeoutError", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
+
+    const pending = streamChatCompletions(options({ requestTimeoutMs: 20 }));
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "request_timeout",
+      timeoutMs: 20,
+      message: expect.stringContaining("连接聊天接口"),
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    await assertion;
+  });
+
+  it("收到 SSE 响应头后外部取消仍会中止流", async () => {
+    const controller = new AbortController();
+    let markResponseReady: (() => void) | undefined;
+    const responseReady = new Promise<void>((resolve) => { markResponseReady = resolve; });
+    let fetchSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          fetchSignal?.addEventListener("abort", () => stream.error(fetchSignal?.reason), { once: true });
+          markResponseReady?.();
+        },
+      });
+      return Promise.resolve(new Response(body, { headers: { "content-type": "text/event-stream" } }));
+    }));
+
+    const pending = streamChatCompletions(options({ signal: controller.signal }));
+    await responseReady;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSignal?.aborted).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ import {
   toTransportError,
 } from "@/transport/errors";
 import { isErrorFrame, readSSE, type SSEFrame } from "@/transport/sse";
+import { createRequestTimeoutScope, TimeoutError } from "@/transport/request-timeout";
 import type { ImageResult } from "@/transport/types";
 
 export type ImageResponseFormat = "url" | "b64_json";
@@ -59,6 +60,7 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     throw new TransportError(0, "生成数量必须是 1 到 10 之间的整数", "invalid_request");
   }
 
+  const requestTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IMAGE_IDLE_TIMEOUT_MS;
   const inputImages = options.inputImages?.map((url) => url.trim()).filter(Boolean) ?? [];
   if (inputImages.length > 16) {
     throw new TransportError(0, "参考图不能超过 16 张", "invalid_request");
@@ -71,7 +73,9 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
   const standardEdit = inputImages.length > 0 && routeDefinition.id === "images";
   const routedInputImages = standardEdit
     ? inputImages
-    : await Promise.all(inputImages.map((url, index) => normalizeJSONInputImage(url, index, options.signal)));
+    : await Promise.all(inputImages.map((url, index) => (
+        normalizeJSONInputImage(url, index, options.signal, requestTimeoutMs)
+      )));
 
   const route = resolveImageRoute(options.backend, {
     model,
@@ -88,7 +92,7 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     ? imageEditURL(options.backend.baseURL)
     : route.url;
   const requestBody = standardEdit
-    ? await buildImageEditBody({ ...options, model, prompt, inputImages })
+    ? await buildImageEditBody({ ...options, model, prompt, inputImages, requestTimeoutMs })
     : route.body;
 
   const headers = new Headers({ Accept: "application/json, text/event-stream" });
@@ -97,45 +101,52 @@ export async function generateImages(options: GenerateImagesOptions): Promise<Im
     headers.set("Authorization", `Bearer ${options.backend.apiKey}`);
   }
 
-  const response = await fetch(requestURL, {
-    method: route.method,
-    headers,
-    body: requestBody,
-    signal: options.signal,
-  });
+  const request = createRequestTimeoutScope(options.signal);
+  try {
+    const response = await request.run(() => fetch(requestURL, {
+      method: route.method,
+      headers,
+      body: requestBody,
+      signal: request.signal,
+    }), requestTimeoutMs, "连接图片生成接口");
 
-  if (!response.ok) {
-    throw toTransportError(response, await response.text());
+    if (!response.ok) {
+      const errorText = await request.run(() => response.text(), requestTimeoutMs, "读取图片错误响应");
+      throw toTransportError(response, errorText);
+    }
+
+    const extract = extractorFor(route);
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    if (contentType.includes("text/event-stream")) {
+      return await consumeImageStream(response, options.backend.baseURL, extract, options.onUpdate, requestTimeoutMs);
+    }
+
+    const responseText = await request.run(() => response.text(), requestTimeoutMs, "读取图片生成响应");
+    const frames = readBufferedFrames(responseText);
+    if (frames.length > 0) {
+      return consumeBufferedFrames(response, frames, options.backend.baseURL, extract, options.onUpdate);
+    }
+
+    const payload = parseJSON(responseText);
+    if (payload !== null) {
+      throwForPayloadError(response, undefined, payload);
+      const images = extract(payload, options.backend.baseURL);
+      if (images.length > 0) return images;
+    } else {
+      // 极少数兼容层直接把一条图片 URL 作为纯文本返回。
+      const images = readImagesDeep(responseText.trim(), options.backend.baseURL);
+      if (images.length > 0) return images;
+    }
+
+    throw new TransportError(response.status, "上游没有返回任何可显示的图片", "empty_response");
+  } finally {
+    request.dispose();
   }
-
-  const extract = extractorFor(route);
-  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-  if (contentType.includes("text/event-stream")) {
-    return consumeImageStream(response, options.backend.baseURL, extract, options.onUpdate, options.idleTimeoutMs);
-  }
-
-  const responseText = await response.text();
-  const frames = readBufferedFrames(responseText);
-  if (frames.length > 0) {
-    return consumeBufferedFrames(response, frames, options.backend.baseURL, extract, options.onUpdate);
-  }
-
-  const payload = parseJSON(responseText);
-  if (payload !== null) {
-    throwForPayloadError(response, undefined, payload);
-    const images = extract(payload, options.backend.baseURL);
-    if (images.length > 0) return images;
-  } else {
-    // 极少数兼容层直接把一条图片 URL 作为纯文本返回。
-    const images = readImagesDeep(responseText.trim(), options.backend.baseURL);
-    if (images.length > 0) return images;
-  }
-
-  throw new TransportError(response.status, "上游没有返回任何可显示的图片", "empty_response");
 }
 
 type ImageEditBodyOptions = Omit<GenerateImagesOptions, "backend" | "signal" | "onUpdate" | "idleTimeoutMs"> & {
   inputImages: string[];
+  requestTimeoutMs: number;
 };
 
 async function buildImageEditBody(options: ImageEditBodyOptions & { signal?: AbortSignal }): Promise<FormData> {
@@ -148,7 +159,9 @@ async function buildImageEditBody(options: ImageEditBodyOptions & { signal?: Abo
   if (options.quality) body.set("quality", options.quality);
   body.set("response_format", options.responseFormat);
 
-  const images = await Promise.all(options.inputImages.map((url, index) => loadReferenceImage(url, index, options.signal)));
+  const images = await Promise.all(options.inputImages.map((url, index) => (
+    loadReferenceImage(url, index, options.signal, options.requestTimeoutMs)
+  )));
   const field = images.length === 1 ? "image" : "image[]";
   for (const image of images) body.append(field, image.blob, image.name);
   return body;
@@ -158,12 +171,15 @@ async function loadReferenceImage(
   source: string,
   index: number,
   signal?: AbortSignal,
+  timeoutMs = DEFAULT_IMAGE_IDLE_TIMEOUT_MS,
 ): Promise<{ blob: Blob; name: string }> {
+  const request = createRequestTimeoutScope(signal);
   let response: Response;
   try {
-    response = await fetch(source, { signal });
+    response = await request.run(() => fetch(source, { signal: request.signal }), timeoutMs, "读取参考图片");
   } catch (caught) {
-    if (signal?.aborted || isAbortError(caught)) throw caught;
+    request.dispose();
+    if (signal?.aborted || isAbortError(caught) || caught instanceof TimeoutError) throw caught;
     throw new TransportError(
       0,
       "无法读取参考图片。若它来自外部链接，请先下载后再粘贴或上传。",
@@ -171,15 +187,20 @@ async function loadReferenceImage(
     );
   }
   if (!response.ok) {
+    request.dispose();
     throw new TransportError(response.status, `读取第 ${index + 1} 张参考图片失败`, "reference_image_unreadable");
   }
 
-  const blob = await response.blob();
-  const mime = blob.type.toLowerCase();
-  if (mime && !mime.startsWith("image/")) {
-    throw new TransportError(0, `第 ${index + 1} 个参考文件不是图片`, "invalid_reference_image");
+  try {
+    const blob = await request.run(() => response.blob(), timeoutMs, "读取参考图片内容");
+    const mime = blob.type.toLowerCase();
+    if (mime && !mime.startsWith("image/")) {
+      throw new TransportError(0, `第 ${index + 1} 个参考文件不是图片`, "invalid_reference_image");
+    }
+    return { blob, name: `reference-${index + 1}.${imageFileExtension(mime)}` };
+  } finally {
+    request.dispose();
   }
-  return { blob, name: `reference-${index + 1}.${imageFileExtension(mime)}` };
 }
 
 function imageEditURL(baseURL: string): string {
@@ -193,9 +214,14 @@ function imageFileExtension(mime: string): string {
 }
 
 /** blob: URL 只能在当前页面读取，JSON 发到上游前必须变成 data URL。 */
-async function normalizeJSONInputImage(source: string, index: number, signal?: AbortSignal): Promise<string> {
+async function normalizeJSONInputImage(
+  source: string,
+  index: number,
+  signal?: AbortSignal,
+  timeoutMs = DEFAULT_IMAGE_IDLE_TIMEOUT_MS,
+): Promise<string> {
   if (!source.toLowerCase().startsWith("blob:")) return source;
-  const { blob } = await loadReferenceImage(source, index, signal);
+  const { blob } = await loadReferenceImage(source, index, signal, timeoutMs);
   return readBlobAsDataURL(blob.type ? blob : blob.slice(0, blob.size, "image/png"), signal);
 }
 

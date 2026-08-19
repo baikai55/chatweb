@@ -1,5 +1,6 @@
 import { joinURL } from "@/transport/chat-completions";
-import { isRecord, toTransportError, firstString } from "@/transport/errors";
+import { isAbortError, isRecord, toTransportError, firstString } from "@/transport/errors";
+import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import { STORE_MODEL_CACHE, idbGet, idbPut } from "@/shared/db/idb";
 import type { Backend, BackendFlavor, ModelKind } from "@/backends/types";
 
@@ -124,30 +125,48 @@ async function fetchFromNetwork(
   const headers = new Headers({ Accept: "application/json" });
   if (backend.apiKey) headers.set("Authorization", `Bearer ${backend.apiKey}`);
 
-  const response = await fetch(joinURL(backend.baseURL, "/models"), { method: "GET", headers, signal });
-  if (!response.ok) {
-    throw toTransportError(response, await response.text());
+  const request = createRequestTimeoutScope(signal);
+  try {
+    const response = await request.run(() => fetch(joinURL(backend.baseURL, "/models"), {
+      method: "GET",
+      headers,
+      signal: request.signal,
+    }), DEFAULT_REQUEST_TIMEOUT_MS, "连接模型目录接口");
+    if (!response.ok) {
+      const responseText = await request.run(
+        () => response.text(),
+        DEFAULT_REQUEST_TIMEOUT_MS,
+        "读取模型目录错误响应",
+      );
+      throw toTransportError(response, responseText);
+    }
+
+    const flavor = readFlavor(response.headers);
+    const payload = await request.run(
+      () => response.json(),
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      "读取模型目录响应",
+    );
+    const raw = isRecord(payload) && Array.isArray(payload.data) ? payload.data : [];
+    const enrichment = await fetchEnrichment(backend, signal);
+
+    const rows = raw.flatMap((row) => {
+      if (!isRecord(row)) return [];
+      const id = firstString(row.id);
+      if (!id) return [];
+      const extra = enrichment.get(id);
+      return [{
+        id,
+        ownedBy: firstString(row.owned_by) || "unknown",
+        displayName: extra?.displayName,
+        contextWindow: extra?.contextWindow,
+      }];
+    });
+
+    return { rows, flavor };
+  } finally {
+    request.dispose();
   }
-
-  const flavor = readFlavor(response.headers);
-  const payload = await response.json();
-  const raw = isRecord(payload) && Array.isArray(payload.data) ? payload.data : [];
-  const enrichment = await fetchEnrichment(backend, signal);
-
-  const rows = raw.flatMap((row) => {
-    if (!isRecord(row)) return [];
-    const id = firstString(row.id);
-    if (!id) return [];
-    const extra = enrichment.get(id);
-    return [{
-      id,
-      ownedBy: firstString(row.owned_by) || "unknown",
-      displayName: extra?.displayName,
-      contextWindow: extra?.contextWindow,
-    }];
-  });
-
-  return { rows, flavor };
 }
 
 /**
@@ -332,17 +351,29 @@ async function tryFetchRows(
   extraHeaders: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<Array<Record<string, unknown>>> {
+  const request = createRequestTimeoutScope(signal);
   try {
     const headers = new Headers({ Accept: "application/json", ...extraHeaders });
     if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
-    const response = await fetch(url, { method: "GET", headers, signal });
+    const response = await request.run(() => fetch(url, {
+      method: "GET",
+      headers,
+      signal: request.signal,
+    }), DEFAULT_REQUEST_TIMEOUT_MS, "连接模型元数据接口");
     if (!response.ok) return [];
-    const payload = await response.json();
+    const payload = await request.run(
+      () => response.json(),
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      "读取模型元数据响应",
+    );
     if (!isRecord(payload)) return [];
     const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : [];
     return rows.filter(isRecord);
-  } catch {
+  } catch (caught) {
+    if (signal?.aborted || isAbortError(caught)) throw caught;
     return [];
+  } finally {
+    request.dispose();
   }
 }
 

@@ -1,6 +1,14 @@
 import { firstString, isRecord, parseJSON, readError, toTransportError, TransportError } from "@/transport/errors";
 import { joinURL } from "@/transport/chat-completions";
 import { fetchWorkerApi, WorkerAuthorizationError } from "@/transport/worker-access";
+import {
+  createRequestTimeoutScope,
+  DEFAULT_MEDIA_REQUEST_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+} from "@/transport/request-timeout";
+
+/** 视频任务一直处于 pending 时的默认轮询总上限。 */
+export const DEFAULT_VIDEO_POLL_TIMEOUT_MS = 30 * 60_000;
 
 /** 一个可以喂给视频生成接口的源媒体。文件会先由面板上传成公网 URL。 */
 export type VideoSource = {
@@ -37,6 +45,8 @@ type VideoJobInput = {
   apiKey: string;
   model: string;
   prompt: string;
+  /** 提交和读取响应的单阶段上限。默认 60 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -61,7 +71,11 @@ export type VideoExtendInput = VideoJobInput & {
  * 把本地图片/视频交给当前应用的 Worker，得到上游可以访问的公网 URL。
  * 不手动设置 Content-Type，让浏览器为 multipart 自动带 boundary。
  */
-export async function uploadVideoInput(file: File, signal?: AbortSignal): Promise<UploadedVideoInput> {
+export async function uploadVideoInput(
+  file: File,
+  signal?: AbortSignal,
+  requestTimeoutMs = DEFAULT_MEDIA_REQUEST_TIMEOUT_MS,
+): Promise<UploadedVideoInput> {
   if (file.size <= 0) throw new Error("文件是空的");
   if (file.type && !file.type.startsWith("image/") && !file.type.startsWith("video/")) {
     throw new Error("只支持图片或视频文件");
@@ -69,27 +83,32 @@ export async function uploadVideoInput(file: File, signal?: AbortSignal): Promis
 
   const form = new FormData();
   form.append("file", file, file.name || "upload");
-  const response = await fetchWorkerApi("/__api/upload", {
-    method: "POST",
-    headers: { Accept: "application/json" },
-    body: form,
-    signal,
-  });
-  const text = await response.text();
-  const payload = parseJSON(text);
-  if (response.status === 401) {
-    throw new WorkerAuthorizationError("上传未获得 Worker 授权，请在设置的“联网”页验证访问口令");
-  }
-  if (!response.ok) throw toTransportError(response, text);
+  const request = createRequestTimeoutScope(signal);
+  try {
+    const response = await request.run(() => fetchWorkerApi("/__api/upload", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      body: form,
+      signal: request.signal,
+    }), requestTimeoutMs, "上传视频素材");
+    const text = await request.run(() => response.text(), requestTimeoutMs, "读取上传响应");
+    const payload = parseJSON(text);
+    if (response.status === 401) {
+      throw new WorkerAuthorizationError("上传未获得 Worker 授权，请在设置的“联网”页验证访问口令");
+    }
+    if (!response.ok) throw toTransportError(response, text);
 
-  const url = readURL(payload);
-  if (!url) throw new TransportError(response.status, "上传响应里没有公网 URL", "invalid_upload_response");
-  return {
-    url,
-    contentType: firstStringFromPayload(payload, ["contentType", "content_type", "mime", "mime_type"]) || undefined,
-    size: readNumberFromPayload(payload, ["size", "bytes", "file_size"]),
-    key: firstStringFromPayload(payload, ["key", "object_key", "path"]) || undefined,
-  };
+    const url = readURL(payload);
+    if (!url) throw new TransportError(response.status, "上传响应里没有公网 URL", "invalid_upload_response");
+    return {
+      url,
+      contentType: firstStringFromPayload(payload, ["contentType", "content_type", "mime", "mime_type"]) || undefined,
+      size: readNumberFromPayload(payload, ["size", "bytes", "file_size"]),
+      key: firstStringFromPayload(payload, ["key", "object_key", "path"]) || undefined,
+    };
+  } finally {
+    request.dispose();
+  }
 }
 
 /** 提交一个视频生成任务。不同后端常用的 request_id / id / task_id 都会被识别。 */
@@ -141,7 +160,7 @@ async function submitVideoJob(
     headers: authHeaders(input.apiKey),
     body: JSON.stringify(body),
     signal: input.signal,
-  });
+  }, input.requestTimeoutMs);
 
   const requestId = readVideoRequestId(payload);
   const status = readVideoGenerationStatus(payload, requestId, input.baseURL);
@@ -174,6 +193,8 @@ export async function getVideoGeneration(input: {
   baseURL: string;
   apiKey: string;
   requestId: string;
+  /** 单次状态请求建连和读取正文的单阶段上限。默认 60 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<VideoGenerationStatus> {
   const requestId = input.requestId.trim();
@@ -182,7 +203,7 @@ export async function getVideoGeneration(input: {
     method: "GET",
     headers: authHeaders(input.apiKey),
     signal: input.signal,
-  });
+  }, input.requestTimeoutMs);
   return readVideoGenerationStatus(payload, requestId, input.baseURL);
 }
 
@@ -193,6 +214,10 @@ export type PollVideoGenerationInput = {
   /** 创建响应已经带状态时可传入，避免丢掉首帧的进度和错误。 */
   initial?: VideoGenerationStatus;
   intervalMs?: number;
+  /** 每次状态请求的单阶段上限。默认 60 秒。 */
+  requestTimeoutMs?: number;
+  /** 任务持续 pending 的总上限。默认 30 分钟。 */
+  pollTimeoutMs?: number;
   onUpdate?: (status: VideoGenerationStatus) => void;
   signal?: AbortSignal;
 };
@@ -208,18 +233,26 @@ export async function pollVideoGeneration(input: PollVideoGenerationInput): Prom
     if (isTerminal(current)) return current;
   }
 
-  while (true) {
-    throwIfAborted(input.signal);
-    // 创建后先立即读一次，随后才按间隔轮询，避免无意义地让用户等首个状态。
-    current = await getVideoGeneration({
-      baseURL: input.baseURL,
-      apiKey: input.apiKey,
-      requestId: input.requestId,
-      signal: input.signal,
-    });
-    input.onUpdate?.(current);
-    if (isTerminal(current)) return current;
-    await waitWithAbort(input.intervalMs ?? 3_000, input.signal);
+  const polling = createRequestTimeoutScope(input.signal);
+  try {
+    return await polling.run(async () => {
+      while (true) {
+        throwIfAborted(polling.signal);
+        // 创建后先立即读一次，随后才按间隔轮询，避免无意义地让用户等首个状态。
+        current = await getVideoGeneration({
+          baseURL: input.baseURL,
+          apiKey: input.apiKey,
+          requestId: input.requestId,
+          requestTimeoutMs: input.requestTimeoutMs,
+          signal: polling.signal,
+        });
+        input.onUpdate?.(current);
+        if (isTerminal(current)) return current;
+        await waitWithAbort(input.intervalMs ?? 3_000, polling.signal);
+      }
+    }, input.pollTimeoutMs ?? DEFAULT_VIDEO_POLL_TIMEOUT_MS, "等待视频生成");
+  } finally {
+    polling.dispose();
   }
 }
 
@@ -261,14 +294,20 @@ function authHeaders(apiKey: string): Headers {
   return headers;
 }
 
-async function requestJSON(url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(url, init);
-  const text = await response.text();
-  if (!response.ok) throw toTransportError(response, text);
-  if (!text.trim()) throw new TransportError(response.status, "上游返回了空响应", "invalid_response");
-  const payload = parseJSON(text);
-  if (payload === null) throw new TransportError(response.status, "上游返回了无法解析的 JSON", "invalid_response");
-  return payload;
+async function requestJSON(url: string, init: RequestInit, configuredTimeoutMs?: number): Promise<unknown> {
+  const timeoutMs = configuredTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(init.signal ?? undefined);
+  try {
+    const response = await request.run(() => fetch(url, { ...init, signal: request.signal }), timeoutMs, "连接视频接口");
+    const text = await request.run(() => response.text(), timeoutMs, "读取视频接口响应");
+    if (!response.ok) throw toTransportError(response, text);
+    if (!text.trim()) throw new TransportError(response.status, "上游返回了空响应", "invalid_response");
+    const payload = parseJSON(text);
+    if (payload === null) throw new TransportError(response.status, "上游返回了无法解析的 JSON", "invalid_response");
+    return payload;
+  } finally {
+    request.dispose();
+  }
 }
 
 function collectCandidates(payload: unknown): Array<Record<string, unknown>> {

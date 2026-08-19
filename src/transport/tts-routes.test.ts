@@ -239,7 +239,8 @@ describe("synthesizeWithTTSRoute", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/chat/completions`);
     const init = requestInit(fetchMock);
     expect(init.method).toBe("POST");
-    expect(init.signal).toBe(controller.signal);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
     const headers = new Headers(init.headers);
     expect(headers.get("authorization")).toBe("Bearer sk-newapi");
     expect(headers.get("content-type")).toBe("application/json");

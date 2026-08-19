@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { requestWebSearch } from "@/transport/web-search";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -46,16 +48,45 @@ describe("requestWebSearch", () => {
     await expect(requestWebSearch({ query: "test" })).rejects.toThrow("设置的“联网”页验证访问口令");
   });
 
-  it("把 AbortSignal 传给搜索请求", async () => {
+  it("外部取消搜索时保留 AbortError，并中止底层请求", async () => {
     const controller = new AbortController();
-    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      expect(init?.signal).toBe(controller.signal);
-      return Response.json({ ok: false, query: "test", provider: "bing-rss", items: [], error: "没有结果" });
+    let requestSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal;
+      return new Promise<Response>(() => undefined);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await requestWebSearch({ query: "test", signal: controller.signal });
+    const searching = requestWebSearch({ query: "test", signal: controller.signal });
+    controller.abort();
+
+    await expect(searching).rejects.toBe(controller.signal.reason);
+    expect(controller.signal.reason).toMatchObject({ name: "AbortError" });
+    expect(requestSignal).toMatchObject({ aborted: true });
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("搜索响应正文超时会中止底层请求", async () => {
+    vi.useFakeTimers();
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "text").mockImplementation(() => new Promise<string>(() => undefined));
+    let requestSignal: AbortSignal | null = null;
+    vi.stubGlobal("fetch", vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal;
+      return Promise.resolve(response);
+    }));
+
+    const searching = requestWebSearch({ query: "test" });
+    const assertion = expect(searching).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "request_timeout",
+      message: expect.stringContaining("读取函数搜索响应"),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+
+    await assertion;
+    expect(requestSignal).toMatchObject({ aborted: true });
   });
 
   it("auto 不覆盖 Worker 的 SEARCH_PROVIDER 环境配置", async () => {

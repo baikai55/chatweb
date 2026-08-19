@@ -3,6 +3,7 @@ import { joinURL } from "@/transport/chat-completions";
 import { TransportError, isRecord, parseJSON, toTransportError } from "@/transport/errors";
 import { resolveTemplate, selectByPath } from "@/transport/image-routes";
 import type { SpeechAudioResult } from "@/transport/voice";
+import { createRequestTimeoutScope, DEFAULT_MEDIA_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 /** 自定义 TTS 请求模板允许引用的变量。 */
 export const TTS_ROUTE_TEMPLATE_VARIABLES = [
@@ -42,6 +43,8 @@ export type SynthesizeWithTTSRouteOptions = TTSRouteContext & {
   baseURL: string;
   apiKey: string;
   route: CustomTTSRoute;
+  /** 建连和读取音频的单阶段上限。默认 120 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -156,15 +159,18 @@ export async function synthesizeWithTTSRoute(
   if (route.body !== null) headers.set("Content-Type", "application/json");
   if (options.apiKey) headers.set("Authorization", `Bearer ${options.apiKey}`);
 
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_MEDIA_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(options.signal);
   let response: Response;
   try {
-    response = await fetch(route.url, {
+    response = await request.run(() => fetch(route.url, {
       method: route.method,
       headers,
       body: route.body,
-      signal: options.signal,
-    });
+      signal: request.signal,
+    }), timeoutMs, "连接语音合成接口");
   } catch (caught) {
+    request.dispose();
     if (caught instanceof DOMException && caught.name === "AbortError") throw caught;
     if (caught instanceof TypeError) {
       throw new TransportError(
@@ -176,34 +182,41 @@ export async function synthesizeWithTTSRoute(
     throw caught;
   }
 
-  if (!response.ok) throw toTransportError(response, await response.text());
-
-  const responseContentType = normalizeContentType(response.headers.get("content-type"));
-  if (isBinaryContentType(responseContentType)) {
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength === 0) {
-      throw new TransportError(response.status, "语音合成返回了空音频", "empty_response");
+  try {
+    if (!response.ok) {
+      const responseText = await request.run(() => response.text(), timeoutMs, "读取语音合成错误响应");
+      throw toTransportError(response, responseText);
     }
-    const contentType = normalizeAudioMime(responseContentType) || route.contentType;
-    return {
-      url: URL.createObjectURL(new Blob([buffer], { type: contentType })),
-      contentType,
-      source: "binary",
-    };
-  }
 
-  const responseText = await response.text();
-  const payload = parseJSON(responseText);
-  if (payload !== null) {
-    const result = extractRoutedAudio(payload, options.baseURL, route);
-    if (result) return result;
-  } else if (responseText.trim()) {
-    // 少数自定义端点直接返回 URL、data URL 或裸 base64。
-    const result = readDirectAudioValue(responseText, options.baseURL, route.contentType);
-    if (result) return result;
-  }
+    const responseContentType = normalizeContentType(response.headers.get("content-type"));
+    if (isBinaryContentType(responseContentType)) {
+      const buffer = await request.run(() => response.arrayBuffer(), timeoutMs, "读取语音音频");
+      if (buffer.byteLength === 0) {
+        throw new TransportError(response.status, "语音合成返回了空音频", "empty_response");
+      }
+      const contentType = normalizeAudioMime(responseContentType) || route.contentType;
+      return {
+        url: URL.createObjectURL(new Blob([buffer], { type: contentType })),
+        contentType,
+        source: "binary",
+      };
+    }
 
-  throw new TransportError(response.status, "语音合成响应里没有可播放的音频，请检查响应取值路径", "invalid_response");
+    const responseText = await request.run(() => response.text(), timeoutMs, "读取语音合成响应");
+    const payload = parseJSON(responseText);
+    if (payload !== null) {
+      const result = extractRoutedAudio(payload, options.baseURL, route);
+      if (result) return result;
+    } else if (responseText.trim()) {
+      // 少数自定义端点直接返回 URL、data URL 或裸 base64。
+      const result = readDirectAudioValue(responseText, options.baseURL, route.contentType);
+      if (result) return result;
+    }
+
+    throw new TransportError(response.status, "语音合成响应里没有可播放的音频，请检查响应取值路径", "invalid_response");
+  } finally {
+    request.dispose();
+  }
 }
 
 /** 按用户配置的点号路径提取第一段可播放音频。`*` 可展开数组。 */

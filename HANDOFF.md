@@ -31,21 +31,35 @@
 视频、语音拆为异步 chunk；首屏 JS 从约 875 KB / gzip 270 KB 降到约 749 KB /
 gzip 234 KB。入口仍超过 500 KB，后续需继续拆聊天和共享传输代码，不能靠调高警告阈值掩盖。
 
+### 第二轮已完成
+
+1. **统一请求超时与取消语义**：普通建连/JSON/文本默认每阶段 60 秒，音视频正文默认
+   120 秒，图片沿用可配置的 300 秒等待上限，视频轮询增加 30 分钟总上限。超时统一为
+   `TimeoutError`（408 / `request_timeout`），用户主动取消仍保留 `AbortError`。聊天和图片
+   SSE 建连后继续按静默时间控制，并回归了响应头返回后“停止”仍能中止底层流。
+2. **移动端和键盘可访问性**：移动侧栏关闭时移出 Tab 顺序，打开时隔离主内容、聚焦关闭
+   按钮，支持 Escape 并在关闭后归还焦点；只在悬停出现的删除/消息操作按钮也会在键盘
+   聚焦时显示。关键图标按钮补齐可访问名称。
+3. **持续集成基线**：固定 Node 22.23.1、pnpm 11.5.2 和 Node 22 类型定义；GitHub Actions
+   使用 frozen lockfile，执行 `check/test/build/audit`，并限制只读仓库权限和并发重复运行。
+
+最终验证：frozen lockfile 安装、`pnpm check`、`pnpm test`（36 个文件、315 个用例）、
+`pnpm build`、`pnpm audit --audit-level moderate`、`git diff --check` 均通过。构建仍只有
+主聊天包超过 500 KB 的已知提示。
+
 ### 后续仍需处理
 
 1. `/__api/auth` 增加部署层或持久化的限流/失败退避；proxy 增加路径、方法、请求体和
    配额白名单。前端 proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
 2. Markdown 已补基础 XSS 回归；后续继续扩充浏览器差异与 mXSS 语料，保持无第三方
    脚本，评估 Trusted Types，并尽量收窄 CSP `connect-src`。
-3. 为普通 JSON、建连、音视频下载和轮询补统一总超时；保留用户取消，并区分超时、
-   主动取消和上游错误。
-4. 增加组件和 Playwright 冒烟，覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限、
-   流式聊天，以及 Chromium/Safari 的媒体差异；当前单测主要覆盖纯逻辑和传输层。
-5. 拆分 `settings-view.tsx`、`chat-panel.tsx`、`voice-panel.tsx` 等大组件时，优先提取
+3. 增加 Playwright 自动化冒烟，覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限、
+   流式聊天，以及 Chromium/Safari 的媒体差异；本轮补了移动侧栏组件回归，但真浏览器
+   媒体和跨浏览器行为仍需覆盖。
+4. 拆分 `settings-view.tsx`、`chat-panel.tsx`、`voice-panel.tsx` 等大组件时，优先提取
    业务 controller hook 和状态机，不要只搬 JSX。整理 transport 的 URL、模板、JSON path
    等共享依赖，并为 `Backend` 配置设计显式 schema 版本迁移。
-6. 把 R2 lifecycle、`workers_dev`、密钥强度、CI frozen lockfile、Node/pnpm 版本、
-   `check/test/build/audit`、部署回滚和可观测性纳入可验证发布清单。
+5. 把 R2 lifecycle、`workers_dev`、密钥强度、部署回滚和可观测性纳入可验证发布清单。
 
 ## 已完成且验证过
 

@@ -1,5 +1,6 @@
 import { TransportError, isAbortError, isRecord, parseJSON, toTransportError, firstString } from "@/transport/errors";
 import { isErrorFrame, readSSE } from "@/transport/sse";
+import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import {
   readChatContentText,
   type ChatFunctionToolCall,
@@ -33,6 +34,8 @@ export type ChatCompletionsOptions = ChatRequestOptions & {
   searchApiKey?: string;
   searchBaseUrl?: string;
   searchTimeoutMs?: number;
+  /** 建连以及非流式响应正文的单阶段上限。默认 60 秒。 */
+  requestTimeoutMs?: number;
 };
 
 export async function streamChatCompletions(options: ChatCompletionsOptions): Promise<ChatStreamResult> {
@@ -80,28 +83,37 @@ async function requestChatCompletionStep(
 ): Promise<ChatStreamResult> {
   const flavor = options.flavor ?? "generic";
   const body = buildRequestBodyForMode({ ...options, messages }, flavor, toolMode);
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(options.signal);
 
-  const response = await fetch(joinURL(options.baseURL, "/chat/completions"), {
-    method: "POST",
-    headers: new Headers({
-      Accept: "text/event-stream",
-      Authorization: `Bearer ${options.apiKey}`,
-      "Content-Type": "application/json",
-    }),
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
+  try {
+    const response = await request.run(() => fetch(joinURL(options.baseURL, "/chat/completions"), {
+      method: "POST",
+      headers: new Headers({
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${options.apiKey}`,
+        "Content-Type": "application/json",
+      }),
+      body: JSON.stringify(body),
+      signal: request.signal,
+    }), timeoutMs, "连接聊天接口");
 
-  if (!response.ok) {
-    throw toTransportError(response, await response.text());
+    if (!response.ok) {
+      const responseText = await request.run(() => response.text(), timeoutMs, "读取聊天错误响应");
+      throw toTransportError(response, responseText);
+    }
+
+    // 少数后端在 stream:true 下仍返回整包 JSON，兼容一下。
+    // SSE 建连后仍只使用 readSSE 自己的静默超时，不设置总时长上限。
+    if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+      const responseText = await request.run(() => response.text(), timeoutMs, "读取聊天响应");
+      return readNonStreamResponse(response, responseText);
+    }
+
+    return await consumeStream(response, onUpdate);
+  } finally {
+    request.dispose();
   }
-
-  // 少数后端在 stream:true 下仍返回整包 JSON，兼容一下
-  if (!response.headers.get("content-type")?.includes("text/event-stream")) {
-    return readNonStreamResponse(response, await response.text());
-  }
-
-  return consumeStream(response, onUpdate);
 }
 
 /** 导出是为了让单测直接盯请求体 —— 推理档位和搜索工具的形状最容易改错。 */

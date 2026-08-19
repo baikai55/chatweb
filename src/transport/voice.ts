@@ -4,6 +4,11 @@ import { synthesizeWithTTSRoute } from "@/transport/tts-routes";
 import type { CustomTTSRoute } from "@/backends/types";
 import type { STTProtocol } from "@/transport/stt-provider";
 import type { ResolvedVoiceProtocol } from "@/transport/voice-routing";
+import {
+  createRequestTimeoutScope,
+  DEFAULT_MEDIA_REQUEST_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+} from "@/transport/request-timeout";
 
 export type VoiceInfo = {
   voiceId: string;
@@ -43,6 +48,8 @@ export type ListVoicesOptions = {
   model?: string;
   /** 省略时保持原有 grok2api `/tts/voices` 行为。 */
   protocol?: ResolvedVoiceProtocol;
+  /** 建连和读取列表的单阶段上限。默认 60 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -62,6 +69,8 @@ export type SynthesizeSpeechOptions = {
   /** 实测只有这三种可用；aac / flac 上游返回 422。 */
   outputFormat?: "mp3" | "wav" | "opus";
   withTimestamps?: boolean;
+  /** 建连和读取音频的单阶段上限。默认 120 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -73,6 +82,8 @@ export type TranscribeSpeechOptions = {
   /** 省略时保持原有 grok2api `/stt` 行为。 */
   protocol?: STTProtocol | ResolvedVoiceProtocol;
   language?: string;
+  /** 建连和读取转写结果的单阶段上限。默认 120 秒。 */
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -83,27 +94,33 @@ export async function listVoices(options: ListVoicesOptions): Promise<VoiceInfo[
   if (options.protocol === "openai-audio") return [];
 
   const query = options.model ? `?model=${encodeURIComponent(options.model)}` : "";
-  const response = await fetch(joinURL(options.baseURL, `/tts/voices${query}`), {
-    method: "GET",
-    headers: jsonHeaders(options.apiKey),
-    signal: options.signal,
-  });
-  const responseText = await response.text();
-  if (!response.ok) throw toTransportError(response, responseText);
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(options.signal);
+  try {
+    const response = await request.run(() => fetch(joinURL(options.baseURL, `/tts/voices${query}`), {
+      method: "GET",
+      headers: jsonHeaders(options.apiKey),
+      signal: request.signal,
+    }), timeoutMs, "连接声线列表接口");
+    const responseText = await request.run(() => response.text(), timeoutMs, "读取声线列表");
+    if (!response.ok) throw toTransportError(response, responseText);
 
-  const payload = parseJSON(responseText);
-  const rows = readVoiceRows(payload);
-  if (!rows) {
-    throw new TransportError(response.status, "声线列表返回了无法识别的数据", "invalid_response");
+    const payload = parseJSON(responseText);
+    const rows = readVoiceRows(payload);
+    if (!rows) {
+      throw new TransportError(response.status, "声线列表返回了无法识别的数据", "invalid_response");
+    }
+
+    const voices = rows.flatMap(readVoice);
+    const seen = new Set<string>();
+    return voices.filter((voice) => {
+      if (seen.has(voice.voiceId)) return false;
+      seen.add(voice.voiceId);
+      return true;
+    });
+  } finally {
+    request.dispose();
   }
-
-  const voices = rows.flatMap(readVoice);
-  const seen = new Set<string>();
-  return voices.filter((voice) => {
-    if (seen.has(voice.voiceId)) return false;
-    seen.add(voice.voiceId);
-    return true;
-  });
 }
 
 /** 调用 grok2api `/tts` 或 OpenAI `/audio/speech`。 */
@@ -119,6 +136,7 @@ export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promis
       language: options.language,
       speed: options.speed,
       format: options.outputFormat,
+      requestTimeoutMs: options.requestTimeoutMs,
       signal: options.signal,
     });
   }
@@ -144,53 +162,60 @@ export async function synthesizeSpeech(options: SynthesizeSpeechOptions): Promis
   if (protocol === "grok-native" && options.withTimestamps) body.with_timestamps = true;
 
   const path = protocol === "openai-audio" ? "/audio/speech" : "/tts";
-  const response = await fetch(joinURL(options.baseURL, path), {
-    method: "POST",
-    headers: jsonHeaders(options.apiKey, "application/json, audio/*, application/octet-stream"),
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
-  const contentType = normalizeContentType(response.headers.get("content-type"));
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_MEDIA_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(options.signal);
+  try {
+    const response = await request.run(() => fetch(joinURL(options.baseURL, path), {
+      method: "POST",
+      headers: jsonHeaders(options.apiKey, "application/json, audio/*, application/octet-stream"),
+      body: JSON.stringify(body),
+      signal: request.signal,
+    }), timeoutMs, "连接语音合成接口");
+    const contentType = normalizeContentType(response.headers.get("content-type"));
 
-  if (!response.ok) {
-    throw toTransportError(response, await response.text());
-  }
+    if (!response.ok) {
+      const responseText = await request.run(() => response.text(), timeoutMs, "读取语音合成错误响应");
+      throw toTransportError(response, responseText);
+    }
 
-  if (isJSONContentType(contentType)) {
-    const responseText = await response.text();
-    const payload = parseJSON(responseText);
-    const result = readJSONAudio(
-      payload,
-      options.baseURL,
-      codecContentType(options.outputFormat) || contentType,
-    );
-    if (!result) {
+    if (isJSONContentType(contentType)) {
+      const responseText = await request.run(() => response.text(), timeoutMs, "读取语音合成响应");
+      const payload = parseJSON(responseText);
+      const result = readJSONAudio(
+        payload,
+        options.baseURL,
+        codecContentType(options.outputFormat) || contentType,
+      );
+      if (!result) {
+        throw new TransportError(response.status, "语音合成响应里没有可播放的音频", "invalid_response");
+      }
+      return result;
+    }
+
+    if (contentType.startsWith("text/")) {
+      const responseText = (await request.run(() => response.text(), timeoutMs, "读取语音合成响应")).trim();
+      const result = readAmbiguousAudioValue(
+        responseText,
+        options.baseURL,
+        codecContentType(options.outputFormat) || "audio/mpeg",
+      );
+      if (result) return result;
       throw new TransportError(response.status, "语音合成响应里没有可播放的音频", "invalid_response");
     }
-    return result;
-  }
 
-  if (contentType.startsWith("text/")) {
-    const responseText = (await response.text()).trim();
-    const result = readAmbiguousAudioValue(
-      responseText,
-      options.baseURL,
-      codecContentType(options.outputFormat) || "audio/mpeg",
-    );
-    if (result) return result;
-    throw new TransportError(response.status, "语音合成响应里没有可播放的音频", "invalid_response");
+    const buffer = await request.run(() => response.arrayBuffer(), timeoutMs, "读取语音音频");
+    if (buffer.byteLength === 0) {
+      throw new TransportError(response.status, "语音合成返回了空音频", "empty_response");
+    }
+    const mime = normalizeAudioMime(contentType) || codecContentType(options.outputFormat) || "audio/mpeg";
+    return {
+      url: URL.createObjectURL(new Blob([buffer], { type: mime })),
+      contentType: mime,
+      source: "binary",
+    };
+  } finally {
+    request.dispose();
   }
-
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength === 0) {
-    throw new TransportError(response.status, "语音合成返回了空音频", "empty_response");
-  }
-  const mime = normalizeAudioMime(contentType) || codecContentType(options.outputFormat) || "audio/mpeg";
-  return {
-    url: URL.createObjectURL(new Blob([buffer], { type: mime })),
-    contentType: mime,
-    source: "binary",
-  };
 }
 
 /** 上传音频到 grok2api `/stt` 或 OpenAI `/audio/transcriptions`。 */
@@ -213,15 +238,18 @@ export async function transcribeSpeech(options: TranscribeSpeechOptions): Promis
   if (options.apiKey) headers.set("Authorization", `Bearer ${options.apiKey}`);
 
   const path = openAIAudio ? "/audio/transcriptions" : "/stt";
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_MEDIA_REQUEST_TIMEOUT_MS;
+  const request = createRequestTimeoutScope(options.signal);
   let response: Response;
   try {
-    response = await fetch(joinURL(options.baseURL, path), {
+    response = await request.run(() => fetch(joinURL(options.baseURL, path), {
       method: "POST",
       headers,
       body: form,
-      signal: options.signal,
-    });
+      signal: request.signal,
+    }), timeoutMs, "连接语音转写接口");
   } catch (caught) {
+    request.dispose();
     if (caught instanceof DOMException && caught.name === "AbortError") throw caught;
     if (caught instanceof TypeError) {
       throw new TransportError(
@@ -232,21 +260,25 @@ export async function transcribeSpeech(options: TranscribeSpeechOptions): Promis
     }
     throw caught;
   }
-  const responseText = await response.text();
-  if (!response.ok) throw toTransportError(response, responseText);
+  try {
+    const responseText = await request.run(() => response.text(), timeoutMs, "读取语音转写响应");
+    if (!response.ok) throw toTransportError(response, responseText);
 
-  const payload = parseJSON(responseText);
-  if (payload === null) {
-    const text = responseText.trim();
-    if (text) return { text };
-    throw new TransportError(response.status, "语音识别返回了空文本", "empty_response");
-  }
+    const payload = parseJSON(responseText);
+    if (payload === null) {
+      const text = responseText.trim();
+      if (text) return { text };
+      throw new TransportError(response.status, "语音识别返回了空文本", "empty_response");
+    }
 
-  const result = readTranscription(payload);
-  if (!result) {
-    throw new TransportError(response.status, "语音识别返回了无法识别的数据", "invalid_response");
+    const result = readTranscription(payload);
+    if (!result) {
+      throw new TransportError(response.status, "语音识别返回了无法识别的数据", "invalid_response");
+    }
+    return result;
+  } finally {
+    request.dispose();
   }
-  return result;
 }
 
 /** 释放由二进制响应创建的对象 URL。URL/base64 结果无需释放。 */

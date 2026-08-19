@@ -1,6 +1,6 @@
 import { AudioLines, ImageIcon, MessageSquareText, PanelLeft, Plus, Settings2, Trash2, Video, X } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -20,6 +20,8 @@ const MODES: Array<{ mode: ConsoleMode; label: string; icon: typeof MessageSquar
   // 语音只要 tts / stt 有一个就显示，面板内部再分子模式
   { mode: "voice", label: "语音", icon: AudioLines, needs: ["tts", "stt"] },
 ];
+
+const MOBILE_SIDEBAR_QUERY = "(max-width: 63.999rem)";
 
 /**
  * 按后端实际能力过滤模式。
@@ -69,10 +71,50 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [mobileSidebar, setMobileSidebar] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(MOBILE_SIDEBAR_QUERY).matches,
+  );
+  const drawerTriggerRef = useRef<HTMLButtonElement>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const previousDrawerOpenRef = useRef(false);
   /** 生图/视频/语音的历史往这里 portal，见 sidebar-slot.tsx */
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const modes = availableModes(backend);
-  const slotValue = useMemo(() => ({ element: slot, onNavigate: () => setDrawerOpen(false) }), [slot]);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  const slotValue = useMemo(() => ({ element: slot, onNavigate: closeDrawer }), [closeDrawer, slot]);
+
+  useEffect(() => {
+    const query = window.matchMedia(MOBILE_SIDEBAR_QUERY);
+    const update = (event: MediaQueryListEvent | MediaQueryList) => {
+      setMobileSidebar(event.matches);
+      if (!event.matches) setDrawerOpen(false);
+    };
+
+    update(query);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    const wasOpen = previousDrawerOpenRef.current;
+    previousDrawerOpenRef.current = drawerOpen;
+    if (!mobileSidebar) return;
+
+    if (drawerOpen) drawerCloseRef.current?.focus();
+    else if (wasOpen) drawerTriggerRef.current?.focus();
+  }, [drawerOpen, mobileSidebar]);
+
+  useEffect(() => {
+    if (!mobileSidebar || !drawerOpen) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeDrawer();
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [closeDrawer, drawerOpen, mobileSidebar]);
 
   // 当前模式被后端能力砍掉了（比如从 grok2api 切到 CPA 时正停在语音），回落到第一个可用的
   useEffect(() => {
@@ -86,12 +128,17 @@ export function AppShell({
         <button
           type="button"
           aria-label="关闭侧栏"
+          tabIndex={-1}
           className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-          onClick={() => setDrawerOpen(false)}
+          onClick={closeDrawer}
         />
       ) : null}
 
       <aside
+        aria-label="主导航"
+        aria-modal={mobileSidebar && drawerOpen ? true : undefined}
+        role={mobileSidebar ? "dialog" : undefined}
+        inert={mobileSidebar && !drawerOpen ? true : undefined}
         className={cn(
           "z-50 flex h-full w-56 shrink-0 flex-col border-r bg-sidebar transition-transform duration-200 safe-area-top safe-area-bottom",
           "max-lg:fixed max-lg:inset-y-0 max-lg:left-0",
@@ -101,10 +148,12 @@ export function AppShell({
         <div className="flex items-center gap-1 p-2">
           <span className="px-1.5 text-sm font-medium">网页聊天</span>
           <Button
+            ref={drawerCloseRef}
             variant="ghost"
             size="icon"
+            aria-label="关闭侧栏"
             className="ml-auto size-8 lg:hidden"
-            onClick={() => setDrawerOpen(false)}
+            onClick={closeDrawer}
           >
             <X className="size-4" />
           </Button>
@@ -119,7 +168,7 @@ export function AppShell({
             <button
               key={item.mode}
               type="button"
-              onClick={() => { onModeChange(item.mode); setDrawerOpen(false); }}
+              onClick={() => { onModeChange(item.mode); closeDrawer(); }}
               className={cn(
                 "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-sidebar-accent",
                 mode === item.mode && !settingsOpen && "bg-sidebar-accent font-medium",
@@ -140,10 +189,10 @@ export function AppShell({
             <SessionList
               sessions={sessions}
               currentId={currentSessionId}
-              onOpen={(id) => { onOpenSession(id); setDrawerOpen(false); }}
+              onOpen={(id) => { onOpenSession(id); closeDrawer(); }}
               onDelete={onDeleteSession}
               onClearAll={onClearSessions}
-              onNew={() => { onNewChat(); setDrawerOpen(false); }}
+              onNew={() => { onNewChat(); closeDrawer(); }}
             />
           </div>
         ) : null}
@@ -177,7 +226,7 @@ export function AppShell({
               size="sm"
               className={cn("h-8 flex-1 justify-start gap-2 px-2 text-xs font-normal", settingsOpen && "bg-sidebar-accent")}
               disabled={navigationLocked}
-              onClick={onToggleSettings}
+              onClick={() => { onToggleSettings(); closeDrawer(); }}
             >
               <Settings2 className="size-3.5" />设置
             </Button>
@@ -187,11 +236,13 @@ export function AppShell({
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col" inert={mobileSidebar && drawerOpen ? true : undefined}>
         <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5 safe-area-top lg:hidden">
           <Button
+            ref={drawerTriggerRef}
             variant="ghost"
             size="icon"
+            aria-label="打开侧栏"
             className="size-8"
             disabled={navigationLocked}
             onClick={() => setDrawerOpen(true)}
@@ -272,7 +323,7 @@ function SessionList({
                 ariaLabel="删除对话"
                 confirmAriaLabel="确定删除对话"
                 onConfirm={() => onDelete(session.id)}
-                className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
+                className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 group-focus-within:opacity-60 hover:!opacity-100 focus-visible:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
               />
             </div>
           ))

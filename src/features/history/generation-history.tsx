@@ -108,7 +108,7 @@ export function GenerationHistory({
                   size="sm"
                   aria-label="删除这条记录"
                   disabled
-                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity group-hover:opacity-60"
+                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity group-hover:opacity-60 group-focus-within:opacity-60 focus-visible:!opacity-100"
                 >
                   <Trash2 className="size-3" />
                 </Button>
@@ -119,7 +119,7 @@ export function GenerationHistory({
                   ariaLabel="删除这条记录"
                   confirmAriaLabel="确定删除这条记录"
                   onConfirm={() => onDelete(item.id)}
-                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 hover:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
+                  className="h-6 shrink-0 px-1 opacity-0 transition-opacity hover:bg-background group-hover:opacity-60 group-focus-within:opacity-60 hover:!opacity-100 focus-visible:!opacity-100 data-[armed=true]:px-2 data-[armed=true]:opacity-100"
                 />
               )}
             </div>

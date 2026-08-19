@@ -1010,7 +1010,7 @@ export function ChatPanel({
                   onToggle={toggleChatReplySpeech}
                 />
                 {streaming ? (
-                  <Button type="button" size="icon" className="size-9 shrink-0 rounded-full" onClick={stop}>
+                  <Button type="button" size="icon" aria-label="停止生成" className="size-9 shrink-0 rounded-full" onClick={stop}>
                     <Square className="size-3.5 fill-current" />
                   </Button>
                 ) : (
@@ -1282,6 +1282,7 @@ function MessageActions({
       className={cn(
         "flex h-6 items-center gap-0.5 opacity-0 transition-opacity",
         "pointer-events-none group-hover/bubble:pointer-events-auto group-hover/bubble:opacity-100",
+        "focus-within:pointer-events-auto focus-within:opacity-100",
         align === "end" && "justify-end",
         selected && "pointer-events-auto opacity-100",
       )}

@@ -59,6 +59,7 @@ function requestInit(fetchMock: ReturnType<typeof vi.fn>): RequestInit {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -97,7 +98,8 @@ describe("listVoices", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/tts/voices?model=tts%20model%2F1`);
     const init = requestInit(fetchMock);
     expect(init.method).toBe("GET");
-    expect(init.signal).toBe(controller.signal);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer sk-test");
   });
 
@@ -120,6 +122,23 @@ describe("listVoices", () => {
 
     await expect(listVoices(listOptions({ protocol: "openai-audio" }))).resolves.toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("声线列表正文卡住时抛出 TimeoutError", async () => {
+    vi.useFakeTimers();
+    const response = Response.json({ voices: [] });
+    vi.spyOn(response, "text").mockImplementation(() => new Promise<string>(() => undefined));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const pending = listVoices(listOptions({ requestTimeoutMs: 20 }));
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "request_timeout",
+      timeoutMs: 20,
+      message: expect.stringContaining("读取声线列表"),
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    await assertion;
   });
 });
 
@@ -173,7 +192,8 @@ describe("synthesizeSpeech", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/tts`);
     const init = requestInit(fetchMock);
     expect(init.method).toBe("POST");
-    expect(init.signal).toBe(controller.signal);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer sk-test");
     expect(new Headers(init.headers).get("accept")).toBe("application/json, audio/*, application/octet-stream");
     expect(JSON.parse(String(init.body))).toEqual({
@@ -242,6 +262,25 @@ describe("synthesizeSpeech", () => {
 
     releaseSpeechAudio(result);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:voice-test");
+  });
+
+  it("二进制音频正文卡住时抛出 TimeoutError", async () => {
+    vi.useFakeTimers();
+    const response = new Response(new Uint8Array([82, 73, 70, 70]), {
+      headers: { "content-type": "audio/wav" },
+    });
+    vi.spyOn(response, "arrayBuffer").mockImplementation(() => new Promise<ArrayBuffer>(() => undefined));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const pending = synthesizeSpeech(ttsOptions({ requestTimeoutMs: 20 }));
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "request_timeout",
+      timeoutMs: 20,
+      message: expect.stringContaining("读取语音音频"),
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    await assertion;
   });
 
   it("application/octet-stream 不覆盖请求指定的 codec", async () => {
@@ -405,7 +444,8 @@ describe("transcribeSpeech", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/stt`);
     const init = requestInit(fetchMock);
     expect(init.method).toBe("POST");
-    expect(init.signal).toBe(controller.signal);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
     const headers = new Headers(init.headers);
     expect(headers.get("authorization")).toBe("Bearer sk-test");
     expect(headers.get("content-type")).toBeNull();
@@ -562,6 +602,6 @@ describe("取消请求", () => {
     controller.abort();
 
     await expect(promise).rejects.toMatchObject({ name: "AbortError" });
-    expect(requestInit(fetchMock).signal).toBe(controller.signal);
+    expect((requestInit(fetchMock).signal as AbortSignal).aborted).toBe(true);
   });
 });

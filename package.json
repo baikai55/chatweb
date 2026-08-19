@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=22.12.0 <23"
+  },
   "description": "网页聊天 — 连接任意 OpenAI 兼容后端（CPA / grok2api / chat2api），部署在 Cloudflare Workers",
   "scripts": {
     "dev": "vite",
@@ -42,7 +45,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260722.1",
     "@tailwindcss/vite": "^4.3.2",
-    "@types/node": "^26.1.1",
+    "@types/node": "^22.20.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",

@@ -1,4 +1,6 @@
 import { STORE_GENERATIONS, idbClear, idbDelete, idbGetByPrefix, idbPut } from "@/shared/db/idb";
+import { isAbortError } from "@/transport/errors";
+import { createRequestTimeoutScope, DEFAULT_MEDIA_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 /**
  * 生图 / 视频 / 语音的产物记录。
@@ -57,14 +59,27 @@ export function createGenerationId(): string {
  * 四分之一，而 `blob:` URL 一刷新就失效，不转就等于没存。远程 URL 原样存字符串
  * —— 远程链接可能过期，但那是链接本身的性质，把字节抓下来也救不了已经过期的。
  */
-export async function toAsset(url: string, note?: string): Promise<GenerationAsset> {
+export async function toAsset(url: string, note?: string, signal?: AbortSignal): Promise<GenerationAsset> {
   if (/^https?:/i.test(url)) return { url, note };
+  const request = createRequestTimeoutScope(signal);
   try {
-    const blob = await fetch(url).then((response) => response.blob());
+    const response = await request.run(
+      () => fetch(url, { signal: request.signal }),
+      DEFAULT_MEDIA_REQUEST_TIMEOUT_MS,
+      "连接历史媒体",
+    );
+    const blob = await request.run(
+      () => response.blob(),
+      DEFAULT_MEDIA_REQUEST_TIMEOUT_MS,
+      "读取历史媒体",
+    );
     return { blob, contentType: blob.type || undefined, note };
-  } catch {
+  } catch (caught) {
+    if (signal?.aborted || isAbortError(caught)) throw caught;
     // 转不成就退回存 URL，至少不丢这条记录
     return { url, note };
+  } finally {
+    request.dispose();
   }
 }
 

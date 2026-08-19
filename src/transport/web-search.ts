@@ -1,4 +1,5 @@
 import { firstString, isRecord, parseJSON } from "@/transport/errors";
+import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import { fetchWorkerApi, WorkerAuthorizationError } from "@/transport/worker-access";
 
 export type WebSearchItem = {
@@ -35,39 +36,48 @@ export async function requestWebSearch(options: WebSearchRequest): Promise<WebSe
   if (options.baseUrl) body.baseUrl = options.baseUrl;
   if (options.timeoutMs !== undefined) body.timeoutMs = options.timeoutMs;
 
-  const response = await fetchWorkerApi("/__api/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
-  const responseText = await response.text();
-  const payload = parseJSON(responseText);
+  const request = createRequestTimeoutScope(options.signal);
+  try {
+    const response = await request.run(() => fetchWorkerApi("/__api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: request.signal,
+    }), DEFAULT_REQUEST_TIMEOUT_MS, "连接函数搜索接口");
+    const responseText = await request.run(
+      () => response.text(),
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      "读取函数搜索响应",
+    );
+    const payload = parseJSON(responseText);
 
-  if (!response.ok) {
-    const message = isRecord(payload) ? firstString(payload.error, payload.message) : "";
-    if (response.status === 401) {
-      throw new WorkerAuthorizationError("函数搜索未获得 Worker 授权，请在设置的“联网”页验证访问口令");
+    if (!response.ok) {
+      const message = isRecord(payload) ? firstString(payload.error, payload.message) : "";
+      if (response.status === 401) {
+        throw new WorkerAuthorizationError("函数搜索未获得 Worker 授权，请在设置的“联网”页验证访问口令");
+      }
+      throw new Error(message || `搜索接口返回 HTTP ${response.status}`);
     }
-    throw new Error(message || `搜索接口返回 HTTP ${response.status}`);
+    if (!isRecord(payload)) throw new Error("搜索接口返回了无法解析的响应");
+
+    const query = firstString(payload.query) || options.query;
+    const provider = firstString(payload.provider) || options.provider || "unknown";
+    const items = Array.isArray(payload.items)
+      ? payload.items.map(readSearchItem).filter((item): item is WebSearchItem => item !== null).slice(0, 6)
+      : [];
+    const ok = payload.ok === true && items.length > 0;
+    const error = firstString(payload.error);
+
+    return {
+      ok,
+      query,
+      items,
+      provider,
+      ...(!ok && error ? { error } : {}),
+    };
+  } finally {
+    request.dispose();
   }
-  if (!isRecord(payload)) throw new Error("搜索接口返回了无法解析的响应");
-
-  const query = firstString(payload.query) || options.query;
-  const provider = firstString(payload.provider) || options.provider || "unknown";
-  const items = Array.isArray(payload.items)
-    ? payload.items.map(readSearchItem).filter((item): item is WebSearchItem => item !== null).slice(0, 6)
-    : [];
-  const ok = payload.ok === true && items.length > 0;
-  const error = firstString(payload.error);
-
-  return {
-    ok,
-    query,
-    items,
-    provider,
-    ...(!ok && error ? { error } : {}),
-  };
 }
 
 function readSearchItem(value: unknown): WebSearchItem | null {

@@ -238,6 +238,8 @@ IndexedDB 没引 idb / dexie —— 访问模式只有 get/put/delete/getAll，�
 
 ## 开发
 
+需要 Node.js 22（仓库用 `.node-version` 固定当前验证版本）和 pnpm 11.5.2。
+
 ```bash
 pnpm install
 pnpm dev              # Vite，端口 5173

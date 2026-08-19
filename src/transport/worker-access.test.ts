@@ -6,8 +6,10 @@ import {
   fetchWorkerApi,
   hasWorkerAccessToken,
 } from "@/transport/worker-access";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 afterEach(() => {
+  vi.useRealTimers();
   clearWorkerAccessToken();
   vi.unstubAllGlobals();
 });
@@ -65,6 +67,40 @@ describe("Worker 访问 token", () => {
 
     expect(hasWorkerAccessToken()).toBe(false);
     expect(storage.length).toBe(0);
+  });
+
+  it("认证响应正文超时会中止底层请求", async () => {
+    vi.useFakeTimers();
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "text").mockImplementation(() => new Promise<string>(() => undefined));
+    let requestSignal: AbortSignal | null = null;
+    vi.stubGlobal("fetch", vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal;
+      return Promise.resolve(response);
+    }));
+
+    const authenticating = authenticateWorker("password");
+    const assertion = expect(authenticating).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "request_timeout",
+      message: expect.stringContaining("读取 Worker 认证响应"),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
+
+    await assertion;
+    expect(requestSignal).toMatchObject({ aborted: true });
+  });
+
+  it("外部取消认证时保留原 AbortError", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
+
+    const authenticating = authenticateWorker("password", controller.signal);
+    controller.abort();
+
+    await expect(authenticating).rejects.toBe(controller.signal.reason);
+    expect(controller.signal.reason).toMatchObject({ name: "AbortError" });
   });
 });
 

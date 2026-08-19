@@ -135,4 +135,64 @@ describe("generateImages reference images", () => {
       fetchMock.mockRestore();
     }
   });
+
+  it("图片建连使用可配置的等待上限", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise<Response>(() => undefined));
+    try {
+      const pending = generateImages({
+        backend: createBackend({ name: "t", baseURL: "https://x.test/v1" }),
+        model: "gpt-image-2",
+        prompt: "画一只猫",
+        n: 1,
+        responseFormat: "url",
+        idleTimeoutMs: 25,
+      });
+      const assertion = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+        code: "request_timeout",
+        timeoutMs: 25,
+        message: expect.stringContaining("连接图片生成接口"),
+      });
+      await vi.advanceTimersByTimeAsync(25);
+      await assertion;
+    } finally {
+      fetchMock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("收到 SSE 响应头后外部取消仍会中止图片流", async () => {
+    const controller = new AbortController();
+    let markResponseReady: (() => void) | undefined;
+    const responseReady = new Promise<void>((resolve) => { markResponseReady = resolve; });
+    let fetchSignal: AbortSignal | undefined;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      fetchSignal = init?.signal ?? undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          fetchSignal?.addEventListener("abort", () => stream.error(fetchSignal?.reason), { once: true });
+          markResponseReady?.();
+        },
+      });
+      return Promise.resolve(new Response(body, { headers: { "content-type": "text/event-stream" } }));
+    });
+    try {
+      const pending = generateImages({
+        backend: createBackend({ name: "t", baseURL: "https://x.test/v1" }),
+        model: "gpt-image-2",
+        prompt: "画一只猫",
+        n: 1,
+        responseFormat: "url",
+        signal: controller.signal,
+      });
+      await responseReady;
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(fetchSignal?.aborted).toBe(true);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
 });

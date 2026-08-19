@@ -1,4 +1,5 @@
 import { firstString, isRecord, parseJSON } from "@/transport/errors";
+import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 
 const TOKEN_STORAGE_KEY = "chatweb:worker-access-token";
 
@@ -48,27 +49,36 @@ export function clearWorkerAccessToken(): void {
 export async function authenticateWorker(password: string, signal?: AbortSignal): Promise<void> {
   if (!password) throw new Error("请输入 Worker 访问口令");
 
-  const response = await fetch("/__api/auth", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
-    signal,
-  });
-  const responseText = await response.text();
-  const payload = parseJSON(responseText);
-
-  if (!response.ok) {
-    const message = isRecord(payload) ? firstString(payload.error, payload.message) : "";
-    throw new Error(message || `Worker 认证返回 HTTP ${response.status}`);
-  }
-  const token = isRecord(payload) ? firstString(payload.token) : "";
-  if (!token) throw new Error("Worker 认证响应里没有 token");
-
-  memoryToken = token;
+  const request = createRequestTimeoutScope(signal);
   try {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-  } catch {
-    // 当前页面仍可使用内存 token；刷新后需要重新验证。
+    const response = await request.run(() => fetch("/__api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+      signal: request.signal,
+    }), DEFAULT_REQUEST_TIMEOUT_MS, "连接 Worker 认证接口");
+    const responseText = await request.run(
+      () => response.text(),
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      "读取 Worker 认证响应",
+    );
+    const payload = parseJSON(responseText);
+
+    if (!response.ok) {
+      const message = isRecord(payload) ? firstString(payload.error, payload.message) : "";
+      throw new Error(message || `Worker 认证返回 HTTP ${response.status}`);
+    }
+    const token = isRecord(payload) ? firstString(payload.token) : "";
+    if (!token) throw new Error("Worker 认证响应里没有 token");
+
+    memoryToken = token;
+    try {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+    } catch {
+      // 当前页面仍可使用内存 token；刷新后需要重新验证。
+    }
+  } finally {
+    request.dispose();
   }
 }
 
