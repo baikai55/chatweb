@@ -262,6 +262,7 @@ describe("Worker 访问控制", () => {
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
     const request = streamingBytesRequest("https://chat.example/__api/upload", bytes, {
       "content-type": "image/png",
+      "x-upload-length": "8",
       "sec-fetch-site": "same-origin",
     });
 
@@ -270,6 +271,116 @@ describe("Worker 访问控制", () => {
 
     expect(response.status).toBe(413);
     expect(put).not.toHaveBeenCalled();
+  });
+
+  it("有长度的裸 body 校验魔数后以流写入 R2", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    let uploaded = new Uint8Array();
+    const put = vi.fn(async (_key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob) => {
+      expect(value).toBeInstanceOf(ReadableStream);
+      uploaded = new Uint8Array(await new Response(value as BodyInit).arrayBuffer());
+      return { size: uploaded.byteLength } as R2Object;
+    });
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "16",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const request = streamingBytesRequest("https://chat.example/__api/upload", bytes, {
+      "content-type": "image/png",
+      "x-upload-length": String(bytes.byteLength),
+      "sec-fetch-site": "same-origin",
+    });
+
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      contentType: "image/png",
+      size: bytes.byteLength,
+      url: expect.stringContaining("/__api/media/uploads/"),
+    });
+    expect(uploaded).toEqual(bytes);
+    expect(put).toHaveBeenCalledWith(
+      expect.stringMatching(/^uploads\/\d{8}\/[a-z0-9]+\.png$/),
+      expect.any(ReadableStream),
+      expect.objectContaining({
+        httpMetadata: expect.objectContaining({ contentType: "image/png" }),
+      }),
+    );
+  });
+
+  it("裸 body 的声明长度与实际不一致时拒绝写入", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    const put = vi.fn(async (_key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob) => {
+      await new Response(value as BodyInit).arrayBuffer();
+      return { size: bytes.byteLength } as R2Object;
+    });
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "16",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const request = streamingBytesRequest("https://chat.example/__api/upload", bytes, {
+      "content-type": "image/png",
+      "x-upload-length": String(bytes.byteLength + 1),
+      "sec-fetch-site": "same-origin",
+    });
+
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("长度") });
+    expect(put).toHaveBeenCalledOnce();
+  });
+
+  it("Content-Length 与 X-Upload-Length 冲突时在写入 R2 前拒绝", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    const put = vi.fn();
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "16",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const request = streamingBytesRequest("https://chat.example/__api/upload", bytes, {
+      "content-length": String(bytes.byteLength),
+      "content-type": "image/png",
+      "x-upload-length": String(bytes.byteLength + 1),
+      "sec-fetch-site": "same-origin",
+    });
+
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("不一致") });
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("保留 multipart 上传兼容且直接把解析出的 File 交给 R2", async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 1, 2, 3]);
+    const put = vi.fn(async (_key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob) => {
+      expect(value).toBeInstanceOf(File);
+      expect(new Uint8Array(await (value as Blob).arrayBuffer())).toEqual(bytes);
+      return { size: (value as Blob).size } as R2Object;
+    });
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "16",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const form = new FormData();
+    form.set("file", new File([bytes], "photo.jpg", { type: "image/jpeg" }));
+    const request = new Request("https://chat.example/__api/upload", {
+      method: "POST",
+      headers: { "sec-fetch-site": "same-origin" },
+      body: form,
+    });
+
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ contentType: "image/jpeg", size: bytes.byteLength });
+    expect(put).toHaveBeenCalledOnce();
   });
 
   it("multipart 上传体也受文件上限加固定封装开销的硬限制", async () => {
@@ -304,6 +415,94 @@ describe("Worker 访问控制", () => {
     const response = await worker.fetch(request, env);
 
     expect(response.status).toBe(413);
+  });
+});
+
+describe("Worker 公开媒体读取", () => {
+  const key = "uploads/20260819/abc123.mp4";
+  const bytes = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);
+
+  it("拒绝非法对象键，并把缺失对象返回为 404", async () => {
+    const head = vi.fn(async () => null);
+    const env = makeEnv({ MEDIA: { head } as unknown as R2Bucket });
+
+    const invalid = await worker.fetch(
+      new Request("https://chat.example/__api/media/not-an-upload"),
+      env,
+    );
+    const missing = await worker.fetch(
+      new Request(`https://chat.example/__api/media/${key}`),
+      env,
+    );
+
+    expect(invalid.status).toBe(400);
+    expect(missing.status).toBe(404);
+    expect(head).toHaveBeenCalledOnce();
+  });
+
+  it("GET 返回完整媒体及缓存、ETag 和字节范围元数据", async () => {
+    const { bucket, get } = mediaBucket(bytes);
+    const response = await worker.fetch(
+      new Request(`https://chat.example/__api/media/${key}`),
+      makeEnv({ MEDIA: bucket }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    expect(response.headers.get("content-type")).toBe("video/mp4");
+    expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(response.headers.get("accept-ranges")).toBe("bytes");
+    expect(response.headers.get("etag")).toBe('"media-etag"');
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(get).toHaveBeenCalledWith(key, undefined);
+  });
+
+  it("HEAD 和命中 If-None-Match 时不读取 R2 正文", async () => {
+    const { bucket, get } = mediaBucket(bytes);
+    const env = makeEnv({ MEDIA: bucket });
+
+    const head = await worker.fetch(new Request(`https://chat.example/__api/media/${key}`, {
+      method: "HEAD",
+    }), env);
+    const notModified = await worker.fetch(new Request(`https://chat.example/__api/media/${key}`, {
+      headers: { "If-None-Match": 'W/"media-etag"' },
+    }), env);
+
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect((await head.arrayBuffer()).byteLength).toBe(0);
+    expect(notModified.status).toBe(304);
+    expect(notModified.headers.get("etag")).toBe('"media-etag"');
+    expect(notModified.headers.get("content-length")).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("单段 Range 返回 206，后缀范围可用，越界范围返回 416", async () => {
+    const { bucket, get } = mediaBucket(bytes);
+    const env = makeEnv({ MEDIA: bucket });
+
+    const partial = await worker.fetch(new Request(`https://chat.example/__api/media/${key}`, {
+      headers: { Range: "bytes=2-5" },
+    }), env);
+    const suffix = await worker.fetch(new Request(`https://chat.example/__api/media/${key}`, {
+      headers: { Range: "bytes=-2" },
+    }), env);
+    const invalid = await worker.fetch(new Request(`https://chat.example/__api/media/${key}`, {
+      headers: { Range: "bytes=99-100" },
+    }), env);
+
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("content-range")).toBe("bytes 2-5/8");
+    expect(partial.headers.get("content-length")).toBe("4");
+    expect(new Uint8Array(await partial.arrayBuffer())).toEqual(bytes.slice(2, 6));
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers.get("content-range")).toBe("bytes 6-7/8");
+    expect(new Uint8Array(await suffix.arrayBuffer())).toEqual(bytes.slice(6));
+    expect(invalid.status).toBe(416);
+    expect(invalid.headers.get("content-range")).toBe("bytes */8");
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, key, { range: { offset: 2, length: 4 } });
+    expect(get).toHaveBeenNthCalledWith(2, key, { range: { offset: 6, length: 2 } });
   });
 });
 
@@ -346,4 +545,32 @@ function streamingBytesRequest(url: string, bytes: Uint8Array, headers: Record<s
     body: stream,
     duplex: "half",
   } as RequestInit);
+}
+
+function mediaBucket(bytes: Uint8Array): {
+  bucket: R2Bucket;
+  get: ReturnType<typeof vi.fn>;
+} {
+  const metadata = {
+    size: bytes.byteLength,
+    httpEtag: '"media-etag"',
+    writeHttpMetadata(headers: Headers) {
+      headers.set("Content-Type", "video/mp4");
+    },
+  } as R2Object;
+  const get = vi.fn(async (_key: string, options?: R2GetOptions) => {
+    const range = options?.range as { offset: number; length: number } | undefined;
+    const body = range ? bytes.slice(range.offset, range.offset + range.length) : bytes;
+    return {
+      ...metadata,
+      body: new Response(body).body,
+    } as R2ObjectBody;
+  });
+  return {
+    bucket: {
+      head: vi.fn(async () => metadata),
+      get,
+    } as unknown as R2Bucket,
+    get,
+  };
 }

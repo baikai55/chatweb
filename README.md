@@ -247,7 +247,7 @@ pnpm dev:worker       # wrangler，端口 8787（函数搜索、上传和反代�
 pnpm check            # 类型检查
 pnpm test             # vitest，测试会 mock 网络，不访问真实服务
 pnpm build            # 产出 dist/
-pnpm test:e2e         # 构建后用 Chromium 跑严格断网 mock 的核心浏览器冒烟
+pnpm test:e2e         # 构建后用桌面/移动 Chromium 跑严格断网 mock 的核心浏览器冒烟
 ```
 
 首次在新机器运行浏览器冒烟前执行 `pnpm exec playwright install chromium`。测试只允许访问本地预览页和内置 mock 路径，任何 CPA、grok2api、Worker API 或其他外部请求都会被阻断并使测试失败。
@@ -294,7 +294,13 @@ wrangler secret put SEARCH_API_KEY     # 仅 Tavily/Serper 时需要
 （Git 自动部署）时也因此不用在面板里额外配置构建命令 —— 它默认执行的
 `npx wrangler deploy` 会连带触发构建。
 
-建议给 R2 桶配一条 lifecycle rule 自动清理 7 天前的对象。
+公开媒体的缓存时间不会删除 R2 对象。确认这些上传素材只需保留 7 天后，给
+`uploads/` 前缀添加 lifecycle rule（该命令会让过期对象自动删除）：
+
+```bash
+wrangler r2 bucket lifecycle add chatweb expire-uploads-7d uploads/ --expire-days 7
+wrangler r2 bucket lifecycle list chatweb
+```
 
 ## 常见问题
 

@@ -68,6 +68,8 @@ export function useChatSessions(scope: string, defaultModel: string, reloadToken
   const loadEpochRef = useRef(0);
   const persistenceAttemptRef = useRef(0);
   const mutatedSessionIdsRef = useRef(new Set<string>());
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   // defaultModel 变化不该重载会话，用 ref 取最新值
   const defaultModelRef = useRef(defaultModel);
@@ -128,6 +130,14 @@ export function useChatSessions(scope: string, defaultModel: string, reloadToken
     const titled = derivedTitle
       ? { ...session, title: derivedTitle }
       : session;
+    const previous = currentRef.current.id === titled.id ? currentRef.current : null;
+    const nextMessageIds = new Set(titled.messages.map((message) => message.id));
+    const removedMessageIds = new Set(
+      previous?.messages
+        .filter((message) => !nextMessageIds.has(message.id))
+        .map((message) => message.id) ?? [],
+    );
+    currentRef.current = titled;
     mutatedSessionIdsRef.current.add(titled.id);
     setCurrent(titled);
     setSessions((previous) => upsertSession(previous, titled).filter((item) => item.messages.length > 0));
@@ -138,7 +148,7 @@ export function useChatSessions(scope: string, defaultModel: string, reloadToken
     if (titled.messages.length === 0) {
       return trackPersistence(deleteSession(titled.id), "delete");
     }
-    const persisted = saveSession(titled).then((result) =>
+    const persisted = saveSession(titled, removedMessageIds).then((result) =>
       result.ok ? pruneSessions(scope) : result);
     return trackPersistence(persisted, "save");
   }, [scope, trackPersistence]);

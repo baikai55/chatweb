@@ -1,4 +1,4 @@
-import { STORE_SESSIONS, idbClear, idbDelete, idbGetByScope, idbPut } from "@/shared/db/idb";
+import { STORE_SESSIONS, idbClear, idbDelete, idbGetByScope, idbUpdate } from "@/shared/db/idb";
 import {
   readChatContentText,
   type ChatMessage,
@@ -167,11 +167,41 @@ export async function loadSessions(scope: string): Promise<ChatSession[]> {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export async function saveSession(session: ChatSession): Promise<ChatPersistenceResult> {
+/**
+ * 合并其它标签页已经写入的消息，同时应用当前标签页明确执行的删除。
+ * shell 设置以本次提交为准；消息按已有顺序保留，本次新增消息追加在末尾。
+ */
+export function mergePersistedSession(
+  stored: unknown,
+  incoming: ChatSession,
+  removedMessageIds: ReadonlySet<string> = new Set(),
+): ChatSession {
+  if (!isChatSession(stored) || stored.id !== incoming.id || stored.scope !== incoming.scope) return incoming;
+
+  const incomingById = new Map(incoming.messages.map((message) => [message.id, message]));
+  const messages: ConversationMessage[] = [];
+  const seen = new Set<string>();
+  for (const message of stored.messages) {
+    if (removedMessageIds.has(message.id)) continue;
+    messages.push(incomingById.get(message.id) ?? message);
+    seen.add(message.id);
+  }
+  for (const message of incoming.messages) {
+    if (removedMessageIds.has(message.id) || seen.has(message.id)) continue;
+    messages.push(message);
+  }
+  return { ...incoming, messages };
+}
+
+export async function saveSession(
+  session: ChatSession,
+  removedMessageIds: ReadonlySet<string> = new Set(),
+): Promise<ChatPersistenceResult> {
   // 一条消息都没有就别落盘了
   if (session.messages.length === 0) return { ok: true };
   try {
-    await idbPut(STORE_SESSIONS, session);
+    await idbUpdate<unknown>(STORE_SESSIONS, session.id, (stored) =>
+      mergePersistedSession(stored, session, removedMessageIds));
     return { ok: true };
   } catch (caught) {
     // 不抛异常打断对话，但必须让 hook / 调用方知道这条记录没有落盘。

@@ -29,6 +29,24 @@ const ImagePanel = lazy(() => import("@/features/image/image-panel").then((modul
 const VideoPanel = lazy(() => import("@/features/video/video-panel").then((module) => ({ default: module.VideoPanel })));
 const VoicePanel = lazy(() => import("@/features/voice/voice-panel").then((module) => ({ default: module.VoicePanel })));
 
+function persistBackend(action: () => unknown): boolean {
+  try {
+    action();
+    return true;
+  } catch (caught) {
+    toast.error(caught instanceof Error ? caught.message : "浏览器未能保存后端配置");
+    return false;
+  }
+}
+
+export function completeBackendSetup(
+  backend: Backend | null,
+  save: (backend: Backend) => unknown,
+  close: () => void,
+): void {
+  if (!backend || persistBackend(() => save(backend))) close();
+}
+
 export function App() {
   const { backends, active, save, remove, patch, activate } = useBackends();
   const [adding, setAdding] = useState(false);
@@ -36,7 +54,7 @@ export function App() {
   if (backends.length === 0 || adding) {
     return (
       <BackendSetup
-        onDone={(backend) => { if (backend) save(backend); setAdding(false); }}
+        onDone={(backend) => completeBackendSetup(backend, save, () => setAdding(false))}
         onCancel={backends.length > 0 ? () => setAdding(false) : undefined}
       />
     );
@@ -50,7 +68,7 @@ export function App() {
       toast.error(`这个后端正在被 ${referencedBy.map((item) => item.name).join("、")} 的语音设置使用，请先更换 STT/TTS 供应商`);
       return;
     }
-    remove(active.id);
+    persistBackend(() => remove(active.id));
   }
 
   return (
@@ -58,9 +76,9 @@ export function App() {
       key={active.id}
       backend={active}
       backends={backends}
-      onActivate={activate}
-      onPatch={(changes) => patch(active.id, changes)}
-      onPatchBackend={patch}
+      onActivate={(id) => { persistBackend(() => activate(id)); }}
+      onPatch={(changes) => persistBackend(() => patch(active.id, changes))}
+      onPatchBackend={(id, changes) => persistBackend(() => patch(id, changes))}
       onRemove={removeActiveBackend}
       onAdd={() => setAdding(true)}
     />
@@ -83,8 +101,8 @@ function Console({
   backend: Backend;
   backends: Backend[];
   onActivate: (id: string) => void;
-  onPatch: (changes: Partial<Backend>) => void;
-  onPatchBackend: (id: string, changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
+  onPatchBackend: (id: string, changes: Partial<Backend>) => boolean;
   onRemove: () => void;
   onAdd: () => void;
 }) {

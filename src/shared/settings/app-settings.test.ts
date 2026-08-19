@@ -6,6 +6,7 @@ import {
   SEARCH_PROVIDERS,
   appSettingsSchema,
   loadAppSettings,
+  patchAppSettings,
   subscribeAppSettings,
 } from "@/shared/settings/app-settings";
 
@@ -13,6 +14,7 @@ describe("appSettingsSchema", () => {
   it("新安装默认隐藏聊天麦克风", () => {
     expect(appSettingsSchema.parse({})).toMatchObject({
       showChatMicrophone: false,
+      chatReplySpeechEnabled: false,
       searchProvider: "auto",
       searchApiKey: "",
       searchBaseUrl: "",
@@ -29,6 +31,7 @@ describe("appSettingsSchema", () => {
       submitMode: "ctrl-enter",
       clearInputAfterSubmit: true,
       showChatMicrophone: false,
+      chatReplySpeechEnabled: false,
       searchProvider: "auto",
       searchApiKey: "",
       searchBaseUrl: "",
@@ -42,6 +45,14 @@ describe("appSettingsSchema", () => {
       showChatMicrophone: true,
     })).toMatchObject({
       showChatMicrophone: true,
+    });
+  });
+
+  it("接受用户持久开启回复朗读", () => {
+    expect(appSettingsSchema.parse({
+      chatReplySpeechEnabled: true,
+    })).toMatchObject({
+      chatReplySpeechEnabled: true,
     });
   });
 
@@ -134,6 +145,23 @@ describe("app settings 跨标签页同步", () => {
 
     expect(listener).not.toHaveBeenCalled();
     expect(loadAppSettings()).toBe(before);
+    unsubscribe();
+  });
+
+  it("localStorage 写失败时不更新缓存，也不通知保存成功", () => {
+    const before = loadAppSettings();
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppSettings(listener);
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    expect(() => patchAppSettings({ submitMode: before.submitMode === "enter" ? "ctrl-enter" : "enter" }))
+      .toThrow("浏览器未能保存设置");
+    expect(loadAppSettings()).toBe(before);
+    expect(listener).not.toHaveBeenCalled();
+
+    setItem.mockRestore();
     unsubscribe();
   });
 });

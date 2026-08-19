@@ -39,6 +39,8 @@ export const appSettingsSchema = z.object({
   clearInputAfterSubmit: z.boolean().default(false),
   /** 聊天输入框是否显示麦克风入口；语音页不受这个开关影响。 */
   showChatMicrophone: z.boolean().default(false),
+  /** 自动朗读聊天回复；由输入框音量按钮控制并跨页面切换保留。 */
+  chatReplySpeechEnabled: z.boolean().default(false),
   /** 函数搜索使用的搜索源；原生搜索不读取这组配置。 */
   searchProvider: z.enum(SEARCH_PROVIDERS).default("auto"),
   /** Tavily / Serper 等搜索源的密钥，按需传给 Worker。 */
@@ -120,12 +122,12 @@ function isLocalStorageEvent(event: StorageEvent): boolean {
 export function patchAppSettings(patch: Partial<AppSettings>): AppSettings {
   ensureStorageListener();
   const next = { ...loadAppSettings(), ...patch };
-  cache = next;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    // 配额满或隐私模式。内存里仍然生效，只是刷新后会丢。
+  } catch (caught) {
+    throw new Error("浏览器未能保存设置，请检查站点存储权限或剩余空间", { cause: caught });
   }
+  cache = next;
   for (const listener of listeners) listener(next);
   return next;
 }

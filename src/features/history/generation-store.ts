@@ -45,7 +45,7 @@ export type GenerationRecord = {
   params?: Record<string, unknown>;
 };
 
-export type GenerationPersistenceOperation = "save" | "delete" | "clear" | "prune";
+export type GenerationPersistenceOperation = "load" | "save" | "delete" | "clear" | "prune";
 
 export type GenerationPersistenceFailure = {
   ok: false;
@@ -154,13 +154,8 @@ function isGenerationRecord(value: unknown): value is GenerationRecord {
 
 /** 按创建时间倒序。 */
 export async function loadGenerations(scope: string, kind: GenerationKind): Promise<GenerationRecord[]> {
-  try {
-    const rows = await idbGetByPrefix<unknown>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
-    return rows.filter(isGenerationRecord).sort((a, b) => b.createdAt - a.createdAt);
-  } catch {
-    // 隐私模式或数据库打不开。降级成"没有历史"，不影响生成。
-    return [];
-  }
+  const rows = await idbGetByPrefix<unknown>(STORE_GENERATIONS, "byScopeKind", [scope, kind]);
+  return rows.filter(isGenerationRecord).sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export function saveGeneration(record: GenerationRecord): Promise<GenerationPersistenceResult> {

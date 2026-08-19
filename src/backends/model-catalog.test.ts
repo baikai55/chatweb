@@ -64,6 +64,20 @@ describe("模型目录的手动获取边界", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { backendId: backend.id, baseURL: backend.baseURL, fetchedAt: 123 },
+    {
+      backendId: backend.id,
+      baseURL: backend.baseURL,
+      fetchedAt: 123,
+      rows: [{ id: 42, ownedBy: "openai" }],
+    },
+  ])("坏模型缓存按未命中处理", async (cached) => {
+    vi.mocked(idbGet).mockResolvedValue(cached);
+
+    await expect(readModelCatalog(backend)).resolves.toBeNull();
+  });
+
   it("显式刷新会等待 IndexedDB 写入完成后才返回", async () => {
     let finishWrite: ((key: IDBValidKey) => void) | undefined;
     vi.mocked(idbPut).mockImplementation(() => new Promise((resolve) => {

@@ -646,6 +646,8 @@ export function ImagePanel({
           image={images[previewIndex]}
           index={previewIndex}
           total={images.length}
+          onPrevious={() => setPreviewIndex((current) => current === null ? null : Math.max(0, current - 1))}
+          onNext={() => setPreviewIndex((current) => current === null ? null : Math.min(images.length - 1, current + 1))}
           onClose={() => setPreviewIndex(null)}
           returnFocus={previewTriggerRef.current}
         />

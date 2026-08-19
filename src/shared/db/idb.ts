@@ -103,6 +103,35 @@ export function idbPut<T>(storeName: string, value: T): Promise<IDBValidKey> {
   return runTransaction(storeName, "readwrite", (store) => store.put(value as unknown as never));
 }
 
+/** 在同一个 readwrite 事务里读取并改写一条记录，避免多个标签页的读改写互相覆盖。 */
+export function idbUpdate<T>(
+  storeName: string,
+  key: IDBValidKey,
+  update: (current: T | undefined) => T,
+): Promise<T> {
+  return open().then((db) => new Promise<T>((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    const store = transaction.objectStore(storeName);
+    const getRequest = store.get(key);
+    let next: T | undefined;
+
+    getRequest.onsuccess = () => {
+      try {
+        next = update(getRequest.result as T | undefined);
+        store.put(next as unknown as never);
+      } catch (caught) {
+        transaction.abort();
+        reject(caught);
+      }
+    };
+    getRequest.onerror = () => reject(getRequest.error ?? new Error("数据库读取失败"));
+    transaction.oncomplete = () => {
+      if (next !== undefined) resolve(next);
+    };
+    transaction.onabort = () => reject(transaction.error ?? new Error("数据库事务被中断"));
+  }));
+}
+
 export function idbDelete(storeName: string, key: IDBValidKey): Promise<undefined> {
   return runTransaction(storeName, "readwrite", (store) => store.delete(key));
 }

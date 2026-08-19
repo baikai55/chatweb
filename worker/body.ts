@@ -42,7 +42,7 @@ export async function readBodyWithLimit(
 ): Promise<ArrayBuffer> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError("maxBytes must be a positive integer");
 
-  const declaredLength = parseContentLength(headers.get("Content-Length"));
+  const declaredLength = readContentLength(headers);
   if (declaredLength !== null && declaredLength > maxBytes) {
     await cancelBody(body);
     throw new BodyTooLargeError();
@@ -76,14 +76,53 @@ export async function readBodyWithLimit(
   return bytes.buffer;
 }
 
+/**
+ * 上传兼容路径使用 Blob 保存分块，避免先拼一份 ArrayBuffer、再给 multipart
+ * 解析器复制一份。裸 body 的正常路径会直接流入 R2，不经过这里。
+ */
+export async function readBlobWithLimit(
+  body: ReadableStream<Uint8Array> | null,
+  headers: Headers,
+  maxBytes: number,
+): Promise<Blob> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError("maxBytes must be a positive integer");
+
+  const declaredLength = readContentLength(headers);
+  if (declaredLength !== null && declaredLength > maxBytes) {
+    await cancelBody(body);
+    throw new BodyTooLargeError();
+  }
+  if (!body) return new Blob();
+
+  const reader = body.getReader();
+  const chunks: ArrayBufferView[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new BodyTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new Blob(chunks);
+}
+
 function decodeUtf8(bytes: ArrayBuffer): string {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
 }
 
-function parseContentLength(value: string | null): number | null {
+export function readContentLength(headers: Headers): number | null {
+  const value = headers.get("Content-Length");
   if (!value || !/^\d+$/.test(value.trim())) return null;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  return Number.isSafeInteger(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
 async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {

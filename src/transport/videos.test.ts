@@ -4,6 +4,7 @@ import {
   createVideoGeneration,
   getVideoGeneration,
   pollVideoGeneration,
+  uploadVideoInput,
 } from "@/transport/videos";
 
 afterEach(() => {
@@ -12,6 +13,32 @@ afterEach(() => {
 });
 
 describe("视频请求超时", () => {
+  it("上传素材使用裸 File body 并保留 MIME", async () => {
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "source.png", {
+      type: "image/png",
+    });
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.body).toBe(file);
+      const headers = new Headers(init?.headers);
+      expect(headers.get("content-type")).toBe("image/png");
+      expect(headers.get("accept")).toBe("application/json");
+      expect(headers.get("x-upload-length")).toBe(String(file.size));
+      return Response.json({
+        url: "https://chat.example/__api/media/uploads/20260819/source.png",
+        contentType: "image/png",
+        size: file.size,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(uploadVideoInput(file)).resolves.toEqual({
+      url: "https://chat.example/__api/media/uploads/20260819/source.png",
+      contentType: "image/png",
+      size: file.size,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("生成任务使用组合 signal，并解析 request_id", async () => {
     const controller = new AbortController();
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

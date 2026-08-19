@@ -127,6 +127,18 @@ describe("mergeGenerationRecords", () => {
 });
 
 describe("useGenerationHistory 持久化可靠性", () => {
+  it("读取失败不会伪装成空历史", async () => {
+    const error = new Error("IndexedDB unavailable");
+    storeMocks.loadGenerations.mockRejectedValueOnce(error);
+    const hook = await renderHook();
+
+    await act(async () => { await Promise.resolve(); });
+
+    expect(hook.get().loading).toBe(false);
+    expect(hook.get().persistenceError).toEqual({ ok: false, operation: "load", error });
+    expect(toastMocks.error).toHaveBeenCalledWith("生成历史读取失败，本次仍可继续生成");
+  });
+
   it("保存失败停止裁剪、暴露错误并统一提示用户", async () => {
     const error = new Error("quota exceeded");
     const failure: GenerationPersistenceFailure = { ok: false, operation: "save", error };

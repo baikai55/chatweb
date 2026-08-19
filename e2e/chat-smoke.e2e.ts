@@ -93,6 +93,8 @@ test("添加后端、保存模型并完成一次流式聊天", async ({ page }) 
   await page.getByLabel("API Key").fill("mock-api-key");
   await page.getByRole("button", { name: "添加后端" }).click();
 
+  const sidebarTrigger = page.getByRole("button", { name: "打开侧栏" });
+  if (await sidebarTrigger.isVisible()) await sidebarTrigger.click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("tab", { name: "模型" }).click();
   await page.getByRole("button", { name: "获取模型" }).click();
@@ -102,6 +104,7 @@ test("添加后端、保存模型并完成一次流式聊天", async ({ page }) 
   await modelRow.click();
   await page.getByRole("button", { name: "保存", exact: true }).click();
 
+  if (await sidebarTrigger.isVisible()) await sidebarTrigger.click();
   await page.getByRole("button", { name: "对话", exact: true }).click();
   await page.getByPlaceholder("说点什么…").fill("浏览器冒烟测试");
   await page.getByRole("button", { name: "发送" }).click();

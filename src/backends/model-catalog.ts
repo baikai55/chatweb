@@ -2,7 +2,7 @@ import { joinURL } from "@/transport/chat-completions";
 import { isAbortError, isRecord, toTransportError, firstString } from "@/transport/errors";
 import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import { STORE_MODEL_CACHE, idbGet, idbPut } from "@/shared/db/idb";
-import type { Backend, BackendFlavor, ModelKind } from "@/backends/types";
+import { BACKEND_FLAVORS, type Backend, type BackendFlavor, type ModelKind } from "@/backends/types";
 
 /**
  * 模型目录。
@@ -208,10 +208,29 @@ function decorate(rows: CachedCatalog["rows"], backend: Backend): CatalogModel[]
 
 async function readCache(backendId: string): Promise<CachedCatalog | undefined> {
   try {
-    return await idbGet<CachedCatalog>(STORE_MODEL_CACHE, backendId);
+    const cached = await idbGet<unknown>(STORE_MODEL_CACHE, backendId);
+    return isCachedCatalog(cached, backendId) ? cached : undefined;
   } catch {
     return undefined;
   }
+}
+
+function isCachedCatalog(value: unknown, backendId: string): value is CachedCatalog {
+  if (!isRecord(value) || value.backendId !== backendId) return false;
+  if (typeof value.fetchedAt !== "number" || !Number.isFinite(value.fetchedAt)) return false;
+  if (value.baseURL !== undefined && typeof value.baseURL !== "string") return false;
+  if (
+    value.flavor !== undefined
+    && (typeof value.flavor !== "string" || !BACKEND_FLAVORS.includes(value.flavor as BackendFlavor))
+  ) return false;
+  return Array.isArray(value.rows) && value.rows.every((row) => (
+    isRecord(row)
+    && typeof row.id === "string"
+    && typeof row.ownedBy === "string"
+    && (row.displayName === undefined || typeof row.displayName === "string")
+    && (row.contextWindow === undefined
+      || (typeof row.contextWindow === "number" && Number.isFinite(row.contextWindow)))
+  ));
 }
 
 async function writeCache(entry: CachedCatalog): Promise<void> {

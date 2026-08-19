@@ -342,6 +342,7 @@ export function VideoPanel({
         onNew={startNew}
         newLabel="新视频"
         newDisabled={busy}
+        busy={busy}
         onOpen={showRecord}
         onDelete={(id) => {
           history.remove(id);

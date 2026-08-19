@@ -46,6 +46,7 @@ import {
   patchAppSettings,
   requestNotificationPermission,
   useAppSettings,
+  type AppSettings,
   type SearchProvider,
   type SubmitMode,
 } from "@/shared/settings/app-settings";
@@ -137,6 +138,15 @@ export type BackendCatalogState = {
   available: boolean;
 };
 
+function tryPatchAppSettings(patch: Partial<AppSettings>): AppSettings | null {
+  try {
+    return patchAppSettings(patch);
+  } catch (caught) {
+    toast.error(caught instanceof Error ? caught.message : "浏览器未能保存设置");
+    return null;
+  }
+}
+
 export function SettingsView({
   backend, backends, models, catalogsByBackendId, fetchedAt, stale, fetchingBackendId, fetchErrorsByBackendId,
   fetchBlocked, loading, error, onFetchModels, onFetchBackendModels, onPatch, onPatchBackend, onRemove, onAdd,
@@ -157,8 +167,8 @@ export function SettingsView({
   error: string;
   onFetchModels: () => void;
   onFetchBackendModels: (backendId: string) => void;
-  onPatch: (changes: Partial<Backend>) => void;
-  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => boolean;
   onRemove: () => void;
   onAdd: () => void;
   draft: ModelDraft | null;
@@ -230,6 +240,11 @@ export function SearchSettingsSection() {
   const [authenticating, setAuthenticating] = useState(false);
   const [workerAuthorized, setWorkerAuthorized] = useState(() => hasWorkerAccessToken());
   const authAbortRef = useRef<AbortController | null>(null);
+  const [baseline, setBaseline] = useState(() => ({
+    provider: settings.searchProvider,
+    apiKey: settings.searchApiKey,
+    baseUrl: settings.searchBaseUrl,
+  }));
 
   useEffect(() => () => {
     authAbortRef.current?.abort();
@@ -237,17 +252,39 @@ export function SearchSettingsSection() {
   }, []);
 
   const normalizedBaseUrl = baseUrl.trim();
-  const dirty = provider !== settings.searchProvider
-    || apiKey !== settings.searchApiKey
-    || normalizedBaseUrl !== settings.searchBaseUrl;
+  const dirty = provider !== baseline.provider
+    || apiKey !== baseline.apiKey
+    || normalizedBaseUrl !== baseline.baseUrl;
+  const externallyChanged = settings.searchProvider !== baseline.provider
+    || settings.searchApiKey !== baseline.apiKey
+    || settings.searchBaseUrl !== baseline.baseUrl;
+  const conflict = dirty && externallyChanged;
+
+  useEffect(() => {
+    if (!externallyChanged || dirty) return;
+    setProvider(settings.searchProvider);
+    setApiKey(settings.searchApiKey);
+    setBaseUrl(settings.searchBaseUrl);
+    setBaseline({
+      provider: settings.searchProvider,
+      apiKey: settings.searchApiKey,
+      baseUrl: settings.searchBaseUrl,
+    });
+  }, [dirty, externallyChanged, settings.searchProvider, settings.searchApiKey, settings.searchBaseUrl]);
 
   function save(): void {
-    patchAppSettings({
+    if (conflict) {
+      toast.error("联网设置已在其他标签页更新，请先载入最新值");
+      return;
+    }
+    const saved = tryPatchAppSettings({
       searchProvider: provider,
       searchApiKey: apiKey,
       searchBaseUrl: normalizedBaseUrl,
     });
+    if (!saved) return;
     setBaseUrl(normalizedBaseUrl);
+    setBaseline({ provider, apiKey, baseUrl: normalizedBaseUrl });
     toast.success("联网搜索设置已保存");
   }
 
@@ -255,6 +292,11 @@ export function SearchSettingsSection() {
     setProvider(settings.searchProvider);
     setApiKey(settings.searchApiKey);
     setBaseUrl(settings.searchBaseUrl);
+    setBaseline({
+      provider: settings.searchProvider,
+      apiKey: settings.searchApiKey,
+      baseUrl: settings.searchBaseUrl,
+    });
   }
 
   async function authorizeWorker(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -330,11 +372,18 @@ export function SearchSettingsSection() {
       </div>
 
       <div className="mt-3 flex gap-2">
-        <Button size="sm" className="h-8 text-xs" disabled={!dirty} onClick={save}>保存</Button>
+        <Button size="sm" className="h-8 text-xs" disabled={!dirty || conflict} onClick={save}>保存</Button>
         {dirty ? (
-          <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={restore}>还原</Button>
+          <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={restore}>
+            {conflict ? "载入最新" : "还原"}
+          </Button>
         ) : null}
       </div>
+      {conflict ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          联网设置已在其他标签页更新。载入最新值后再修改，避免覆盖对方的改动。
+        </p>
+      ) : null}
 
       <div className="mt-4 border-t pt-4">
         <h3 className="text-sm font-medium">Worker 访问口令</h3>
@@ -389,29 +438,54 @@ export function SearchSettingsSection() {
 
 /* ── 后端 ─────────────────────────────────────────────────────────── */
 
-function BackendSection({
+export function BackendSection({
   backend, onPatch, onRemove, onAdd,
 }: {
   backend: Backend;
-  onPatch: (changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
   onRemove: () => void;
   onAdd: () => void;
 }) {
   const [name, setName] = useState(backend.name);
   const [baseURL, setBaseURL] = useState(backend.baseURL);
   const [apiKey, setApiKey] = useState(backend.apiKey);
+  const [baseline, setBaseline] = useState(() => ({
+    name: backend.name,
+    baseURL: backend.baseURL,
+    apiKey: backend.apiKey,
+  }));
 
   const normalized = normalizeBaseURL(baseURL);
-  const dirty = name.trim() !== backend.name
-    || normalized !== backend.baseURL
-    || apiKey !== backend.apiKey;
+  const dirty = name.trim() !== baseline.name
+    || normalized !== baseline.baseURL
+    || apiKey !== baseline.apiKey;
+  const externallyChanged = backend.name !== baseline.name
+    || backend.baseURL !== baseline.baseURL
+    || backend.apiKey !== baseline.apiKey;
+  const conflict = dirty && externallyChanged;
+
+  useEffect(() => {
+    if (!externallyChanged || dirty) return;
+    setName(backend.name);
+    setBaseURL(backend.baseURL);
+    setApiKey(backend.apiKey);
+    setBaseline({ name: backend.name, baseURL: backend.baseURL, apiKey: backend.apiKey });
+  }, [backend.name, backend.baseURL, backend.apiKey, dirty, externallyChanged]);
 
   function save(): void {
     if (!normalized) {
       toast.error("地址不能为空");
       return;
     }
-    onPatch({ name: name.trim() || new URL(normalized).hostname, baseURL: normalized, apiKey });
+    if (conflict) {
+      toast.error("后端连接已在其他标签页更新，请先载入最新值");
+      return;
+    }
+    const next = { name: name.trim() || new URL(normalized).hostname, baseURL: normalized, apiKey };
+    if (!onPatch(next)) return;
+    setName(next.name);
+    setBaseURL(next.baseURL);
+    setBaseline(next);
     toast.success("已保存");
   }
 
@@ -456,15 +530,21 @@ function BackendSection({
         </div>
 
         <div className="mt-3 flex gap-2">
-          <Button size="sm" className="h-8 text-xs" disabled={!dirty} onClick={save}>保存</Button>
+          <Button size="sm" className="h-8 text-xs" disabled={!dirty || conflict} onClick={save}>保存</Button>
           {dirty ? (
             <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => {
               setName(backend.name);
               setBaseURL(backend.baseURL);
               setApiKey(backend.apiKey);
-            }}>还原</Button>
+              setBaseline({ name: backend.name, baseURL: backend.baseURL, apiKey: backend.apiKey });
+            }}>{conflict ? "载入最新" : "还原"}</Button>
           ) : null}
         </div>
+        {conflict ? (
+          <p role="alert" className="mt-2 text-xs text-destructive">
+            后端连接已在其他标签页更新。载入最新值后再修改，避免覆盖对方的改动。
+          </p>
+        ) : null}
       </section>
 
       <section className="rounded-lg border p-4">
@@ -522,7 +602,7 @@ function ModelSection({
   fetchedAt: number | null;
   stale: boolean;
   onFetchModels: () => void;
-  onPatch: (changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
   draft: ModelDraft | null;
   onDraftChange: (draft: ModelDraft | null) => void;
 }) {
@@ -711,12 +791,12 @@ function ModelSection({
             <Button
               size="sm" className="h-8 shrink-0 text-xs" disabled={!dirty}
               onClick={() => {
-                onPatch({
+                if (!onPatch({
                   savedModels: current.savedModels,
                   modelOverrides: current.modelOverrides,
                   webSearchModeOverrides: current.webSearchModeOverrides,
                   imageRouteOverrides: current.imageRouteOverrides,
-                });
+                })) return;
                 onDraftChange(null);
                 toast.success(`已保存 ${checkedCount} 个模型`);
               }}
@@ -963,8 +1043,8 @@ function VoiceSettingsSection({
   fetchingBackendId: string | null;
   fetchErrorsByBackendId: Record<string, string>;
   onFetchBackendModels: (backendId: string) => void;
-  onPatch: (changes: Partial<Backend>) => void;
-  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => boolean;
 }) {
   const settings = useAppSettings();
 
@@ -978,7 +1058,7 @@ function VoiceSettingsSection({
           control={
             <Toggle
               checked={settings.showChatMicrophone}
-              onChange={() => patchAppSettings({ showChatMicrophone: !settings.showChatMicrophone })}
+              onChange={() => { tryPatchAppSettings({ showChatMicrophone: !settings.showChatMicrophone }); }}
               label="聊天框显示麦克风"
             />
           }
@@ -1021,7 +1101,7 @@ function CustomTTSRouteSection({
 }: {
   owner: Backend;
   backends: Backend[];
-  onPatchBackend: (backendId: string, changes: Partial<Backend>) => void;
+  onPatchBackend: (backendId: string, changes: Partial<Backend>) => boolean;
 }) {
   const configuredBackendId = owner.voiceRouting.tts.backendId?.trim() || owner.id;
   const [backendId, setBackendId] = useState(configuredBackendId);
@@ -1083,11 +1163,11 @@ function CustomTTSRouteSection({
       setDraftError("这条路由已经不存在，请关闭编辑器后重新选择");
       return;
     }
-    onPatchBackend(target.id, {
+    if (!onPatchBackend(target.id, {
       customTTSRoutes: target.customTTSRoutes.map((route) => route.id === editingId
         ? { ...route, ...result.data }
         : route),
-    });
+    })) return;
     setEditingId(null);
     setDraftError("");
     toast.success("TTS 路由已保存");
@@ -1104,9 +1184,9 @@ function CustomTTSRouteSection({
       toast.error(`路由正在被 ${referencedBy.map((item) => item.name).join("、")} 的 TTS 设置使用，请先取消选择`);
       return;
     }
-    onPatchBackend(target.id, {
+    if (!onPatchBackend(target.id, {
       customTTSRoutes: target.customTTSRoutes.filter((item) => item.id !== route.id),
-    });
+    })) return;
     if (editingId === route.id) setEditingId(null);
     toast.success("TTS 路由已删除");
   }
@@ -1227,7 +1307,7 @@ function VoiceRouteSettingsCard({
   fetchingBackendId: string | null;
   fetchErrorsByBackendId: Record<string, string>;
   onFetchBackendModels: (backendId: string) => void;
-  onPatch: (changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
 }) {
   const initial = initialVoiceRoute(owner, backends, kind);
   const initialKey = `${initial.backendId}\u0000${initial.model}\u0000${initial.protocol}\u0000${initial.routeId}`;
@@ -1276,12 +1356,12 @@ function VoiceRouteSettingsCard({
       protocol: draft.protocol,
       routeId: kind === "tts" ? draft.routeId : "",
     };
-    onPatch({
+    if (!onPatch({
       voiceRouting: {
         ...owner.voiceRouting,
         [kind]: binding,
       },
-    });
+    })) return;
     toast.success(`${title}设置已保存`);
   }
 
@@ -1521,11 +1601,11 @@ function BehaviorSection() {
 
   async function toggleNotify(): Promise<void> {
     if (settings.notifyOnComplete) {
-      patchAppSettings({ notifyOnComplete: false });
+      tryPatchAppSettings({ notifyOnComplete: false });
       return;
     }
     if (await requestNotificationPermission()) {
-      patchAppSettings({ notifyOnComplete: true });
+      tryPatchAppSettings({ notifyOnComplete: true });
     } else {
       toast.error("浏览器没给通知权限，去地址栏左边的站点设置里放开");
     }
@@ -1539,7 +1619,7 @@ function BehaviorSection() {
         control={
           <MiniSelect
             value={settings.submitMode}
-            onChange={(value) => patchAppSettings({ submitMode: value as SubmitMode })}
+            onChange={(value) => { tryPatchAppSettings({ submitMode: value as SubmitMode }); }}
             ariaLabel="提交方式"
             options={[
               { value: "ctrl-enter", label: modifier },
@@ -1554,7 +1634,7 @@ function BehaviorSection() {
         control={
           <Toggle
             checked={settings.clearInputAfterSubmit}
-            onChange={() => patchAppSettings({ clearInputAfterSubmit: !settings.clearInputAfterSubmit })}
+            onChange={() => { tryPatchAppSettings({ clearInputAfterSubmit: !settings.clearInputAfterSubmit }); }}
             label="提交后清空输入框"
           />
         }
@@ -1584,7 +1664,7 @@ function BehaviorSection() {
  * 直接写的话删到空或者中途是个非法值就会被 clamp 回去，光标乱跳。
  * 失焦时才规整并落盘。
  */
-function ImageTimeoutInput() {
+export function ImageTimeoutInput() {
   const settings = useAppSettings();
   const [draft, setDraft] = useState(String(settings.imageTimeoutSeconds));
 
@@ -1597,8 +1677,8 @@ function ImageTimeoutInput() {
       return;
     }
     const clamped = Math.min(IMAGE_TIMEOUT_MAX_SECONDS, Math.max(IMAGE_TIMEOUT_MIN_SECONDS, parsed));
-    patchAppSettings({ imageTimeoutSeconds: clamped });
-    setDraft(String(clamped));
+    const saved = tryPatchAppSettings({ imageTimeoutSeconds: clamped });
+    setDraft(String(saved ? clamped : settings.imageTimeoutSeconds));
   }
 
   return (
@@ -1636,17 +1716,23 @@ function DataSection({ onCleared }: { onCleared: () => void }) {
 
   async function clearAll(): Promise<void> {
     setBusy(true);
-    try {
-      // 只清记录，不动后端配置和模型缓存 —— 删了配置用户就得重新填地址和密钥
-      await Promise.all([clearAllSessions(), clearAllGenerations()]);
-      onCleared();
+    // 只清记录，不动后端配置和模型缓存 —— 删了配置用户就得重新填地址和密钥
+    const result = await clearStoredRecords({ onSessionsCleared: onCleared });
+    if (result.sessionsCleared && result.generationsCleared) {
       setConfirming(false);
       toast.success("已删除全部记录，离线应用缓存和模型列表已保留");
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "删除失败");
-    } finally {
-      setBusy(false);
+    } else {
+      const failed = [
+        !result.sessionsCleared ? "聊天记录" : null,
+        !result.generationsCleared ? "生成记录" : null,
+      ].filter(Boolean).join("和");
+      const succeeded = [
+        result.sessionsCleared ? "聊天记录" : null,
+        result.generationsCleared ? "生成记录" : null,
+      ].filter(Boolean).join("和");
+      toast.error(`${succeeded ? `${succeeded}已删除；` : ""}${failed}删除失败，请重试`);
     }
+    setBusy(false);
   }
 
   return (
@@ -1681,6 +1767,28 @@ function DataSection({ onCleared }: { onCleared: () => void }) {
       </p>
     </section>
   );
+}
+
+export async function clearStoredRecords(
+  options: {
+    clearSessions?: () => Promise<void>;
+    clearGenerations?: () => Promise<void>;
+    onSessionsCleared?: () => void;
+  } = {},
+): Promise<{ sessionsCleared: boolean; generationsCleared: boolean }> {
+  const clearSessions = options.clearSessions ?? clearAllSessions;
+  const clearGenerations = options.clearGenerations ?? clearAllGenerations;
+  const sessionsTask = Promise.resolve().then(clearSessions).then(() => {
+    options.onSessionsCleared?.();
+  });
+  const [sessions, generations] = await Promise.allSettled([
+    sessionsTask,
+    Promise.resolve().then(clearGenerations),
+  ]);
+  return {
+    sessionsCleared: sessions.status === "fulfilled",
+    generationsCleared: generations.status === "fulfilled",
+  };
 }
 
 function StorageUsageSummary({ usage }: { usage: StorageUsage }) {

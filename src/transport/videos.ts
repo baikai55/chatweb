@@ -69,7 +69,8 @@ export type VideoExtendInput = VideoJobInput & {
 
 /**
  * 把本地图片/视频交给当前应用的 Worker，得到上游可以访问的公网 URL。
- * 不手动设置 Content-Type，让浏览器为 multipart 自动带 boundary。
+ * 使用裸 body 让 Worker 可以校验前缀后把请求流直接交给 R2；旧版 multipart
+ * 客户端仍由 Worker 兼容。
  */
 export async function uploadVideoInput(
   file: File,
@@ -81,14 +82,16 @@ export async function uploadVideoInput(
     throw new Error("只支持图片或视频文件");
   }
 
-  const form = new FormData();
-  form.append("file", file, file.name || "upload");
   const request = createRequestTimeoutScope(signal);
   try {
     const response = await request.run(() => fetchWorkerApi("/__api/upload", {
       method: "POST",
-      headers: { Accept: "application/json" },
-      body: form,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Upload-Length": String(file.size),
+      },
+      body: file,
       signal: request.signal,
     }), requestTimeoutMs, "上传视频素材");
     const text = await request.run(() => response.text(), requestTimeoutMs, "读取上传响应");

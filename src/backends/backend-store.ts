@@ -90,12 +90,12 @@ function normalizeActive(state: BackendState): BackendState {
 function commit(next: BackendState): BackendState {
   ensureStorageListener();
   const normalized = normalizeActive(next);
-  cache = normalized;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-  } catch {
-    // 存储配额满或隐私模式。内存里的状态仍然有效，只是刷新后会丢。
+  } catch (caught) {
+    throw new Error("浏览器未能保存后端配置，请检查站点存储权限或剩余空间", { cause: caught });
   }
+  cache = normalized;
   for (const listener of listeners) listener(normalized);
   return normalized;
 }

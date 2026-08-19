@@ -99,9 +99,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // 媒体读取是公开的 —— 上游服务（xAI 等）要能匿名抓到这个 URL
   if (path.startsWith("/media/")) {
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return json({ error: "只支持 GET" }, 405);
+      return json({ error: "只支持 GET/HEAD" }, 405);
     }
-    return handleMediaRead(path.slice("/media/".length), env);
+    return handleMediaRead(request, path.slice("/media/".length), env);
   }
 
   // 服务端密钥代理无条件要求有效 token，绝不接受浏览器来源头代替认证。

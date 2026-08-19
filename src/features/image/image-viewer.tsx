@@ -1,4 +1,4 @@
-import { Minus, Plus, RotateCcw, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Minus, Plus, RotateCcw, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -46,12 +46,16 @@ export function ImageViewer({
   image,
   index,
   total,
+  onPrevious,
+  onNext,
   onClose,
   returnFocus,
 }: {
   image: ImageResult;
   index: number;
   total: number;
+  onPrevious: () => void;
+  onNext: () => void;
   onClose: () => void;
   returnFocus?: HTMLElement | null;
 }) {
@@ -66,7 +70,11 @@ export function ImageViewer({
   const movedRef = useRef(false);
   const dragDistanceRef = useRef(0);
   const onCloseRef = useRef(onClose);
+  const onPreviousRef = useRef(onPrevious);
+  const onNextRef = useRef(onNext);
   onCloseRef.current = onClose;
+  onPreviousRef.current = onPrevious;
+  onNextRef.current = onNext;
   transformRef.current = transform;
 
   const getLayout = useCallback((): ImageViewerLayout => {
@@ -184,6 +192,16 @@ export function ImageViewer({
         reset();
         return;
       }
+      if (transformRef.current.scale <= MIN_IMAGE_SCALE && event.key === "ArrowLeft" && index > 0) {
+        event.preventDefault();
+        onPreviousRef.current();
+        return;
+      }
+      if (transformRef.current.scale <= MIN_IMAGE_SCALE && event.key === "ArrowRight" && index < total - 1) {
+        event.preventDefault();
+        onNextRef.current();
+        return;
+      }
       if (event.key.startsWith("Arrow") && transformRef.current.scale > MIN_IMAGE_SCALE) {
         event.preventDefault();
         const delta = event.shiftKey ? 80 : 32;
@@ -219,7 +237,7 @@ export function ImageViewer({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [applyTransform, getLayout, reset, zoomBy]);
+  }, [applyTransform, getLayout, index, reset, total, zoomBy]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -414,6 +432,21 @@ export function ImageViewer({
           <X />
         </ViewerButton>
       </div>
+
+      {total > 1 ? (
+        <>
+          <div className="absolute left-2 top-1/2 z-10 -translate-y-1/2 sm:left-3">
+            <ViewerButton label="上一张" disabled={index <= 0} onClick={() => onPreviousRef.current()}>
+              <ChevronLeft />
+            </ViewerButton>
+          </div>
+          <div className="absolute right-2 top-1/2 z-10 -translate-y-1/2 sm:right-3">
+            <ViewerButton label="下一张" disabled={index >= total - 1} onClick={() => onNextRef.current()}>
+              <ChevronRight />
+            </ViewerButton>
+          </div>
+        </>
+      ) : null}
 
       <div
         ref={stageRef}

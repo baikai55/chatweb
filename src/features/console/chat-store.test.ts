@@ -4,6 +4,7 @@ import {
   deleteSession,
   deriveSessionTitle,
   loadSessions,
+  mergePersistedSession,
   mergeSessionMessages,
   saveSession,
   type ChatSession,
@@ -14,7 +15,7 @@ const idbMocks = vi.hoisted(() => ({
   clear: vi.fn(),
   delete: vi.fn(),
   getByScope: vi.fn(),
-  put: vi.fn(),
+  update: vi.fn(),
 }));
 
 vi.mock("@/shared/db/idb", () => ({
@@ -22,7 +23,7 @@ vi.mock("@/shared/db/idb", () => ({
   idbClear: idbMocks.clear,
   idbDelete: idbMocks.delete,
   idbGetByScope: idbMocks.getByScope,
-  idbPut: idbMocks.put,
+  idbUpdate: idbMocks.update,
 }));
 
 function userMessage(content: ConversationMessage["content"]): ConversationMessage {
@@ -47,7 +48,9 @@ beforeEach(() => {
   idbMocks.clear.mockReset().mockResolvedValue(undefined);
   idbMocks.delete.mockReset().mockResolvedValue(undefined);
   idbMocks.getByScope.mockReset().mockResolvedValue([]);
-  idbMocks.put.mockReset().mockResolvedValue("session");
+  idbMocks.update.mockReset().mockImplementation(
+    (_store: string, _key: string, update: (current: unknown) => unknown) => Promise.resolve(update(undefined)),
+  );
 });
 
 describe("deriveSessionTitle", () => {
@@ -105,7 +108,7 @@ describe("聊天历史持久化失败", () => {
 
   it("保存失败返回带操作类型的可观察结果", async () => {
     const error = new Error("quota exceeded");
-    idbMocks.put.mockRejectedValueOnce(error);
+    idbMocks.update.mockRejectedValueOnce(error);
 
     await expect(saveSession(session())).resolves.toEqual({
       ok: false,
@@ -123,6 +126,32 @@ describe("聊天历史持久化失败", () => {
       operation: "delete",
       error,
     });
+  });
+});
+
+describe("跨标签页会话合并", () => {
+  it("保留其它标签页新增的消息，并追加当前标签页的新消息", () => {
+    const base = session();
+    const remoteMessage: ConversationMessage = { id: "remote", role: "assistant", content: "另一个标签页" };
+    const localMessage: ConversationMessage = { id: "local", role: "user", content: "当前标签页" };
+
+    expect(mergePersistedSession(
+      { ...base, messages: [...base.messages, remoteMessage] },
+      { ...base, messages: [...base.messages, localMessage] },
+    ).messages).toEqual([...base.messages, remoteMessage, localMessage]);
+  });
+
+  it("只删除当前标签页明确删除的消息", () => {
+    const base = session();
+    const removed: ConversationMessage = { id: "removed", role: "assistant", content: "删除我" };
+    const remote: ConversationMessage = { id: "remote", role: "assistant", content: "保留我" };
+    const incoming = { ...base, messages: base.messages };
+
+    expect(mergePersistedSession(
+      { ...base, messages: [...base.messages, removed, remote] },
+      incoming,
+      new Set([removed.id]),
+    ).messages).toEqual([...base.messages, remote]);
   });
 });
 

@@ -19,6 +19,7 @@ import {
 } from "@/features/history/generation-store";
 
 const PERSISTENCE_ERROR_MESSAGES: Record<GenerationPersistenceOperation, string> = {
+  load: "生成历史读取失败，本次仍可继续生成",
   save: "生成结果未能保存，刷新页面后可能丢失",
   delete: "删除未能写入浏览器存储，刷新后记录可能恢复",
   clear: "清空未能写入浏览器存储，刷新后记录可能恢复",
@@ -82,6 +83,10 @@ export function useGenerationHistory(scope: string, kind: GenerationKind) {
         current.filter((record) => record.scope === scope && record.kind === kind),
         loaded,
       ));
+      setLoading(false);
+    }).catch((caught: unknown) => {
+      if (cancelled || loadEpochRef.current !== loadEpoch) return;
+      setPersistenceError(createGenerationPersistenceFailure("load", caught));
       setLoading(false);
     });
 

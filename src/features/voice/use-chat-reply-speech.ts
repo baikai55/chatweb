@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { unlockAudioElement } from "@/features/voice/browser-audio";
 import { buildConfiguredTTSOptions } from "@/features/voice/voice-call-config";
+import { patchAppSettings, useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
 import { releaseSpeechAudio, synthesizeSpeech, type SpeechAudioResult } from "@/transport/voice";
 import type { VoiceConnection } from "@/transport/voice-routing";
@@ -22,9 +23,10 @@ export function useChatReplySpeech({
   contextKey: string;
   onError: (message: string) => void;
 }) {
-  const [enabled, setEnabled] = useState(false);
+  const { chatReplySpeechEnabled: enabled } = useAppSettings();
   const [phase, setPhase] = useState<ChatReplySpeechPhase>("idle");
-  const enabledRef = useRef(false);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const onErrorRef = useRef(onError);
@@ -57,8 +59,12 @@ export function useChatReplySpeech({
 
   const toggle = useCallback((): ChatReplySpeechToggleResult => {
     if (enabledRef.current) {
+      try {
+        patchAppSettings({ chatReplySpeechEnabled: false });
+      } catch (caught) {
+        return { ok: false, reason: caught instanceof Error ? caught.message : String(caught) };
+      }
       enabledRef.current = false;
-      setEnabled(false);
       stop();
       return { ok: true, reason: "" };
     }
@@ -76,9 +82,23 @@ export function useChatReplySpeech({
     (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
     audioRef.current = audio;
     unlockAudioElement(audio);
-    enabledRef.current = true;
-    setEnabled(true);
-    return { ok: true, reason: "" };
+    try {
+      patchAppSettings({ chatReplySpeechEnabled: true });
+      enabledRef.current = true;
+      return { ok: true, reason: "" };
+    } catch (caught) {
+      return { ok: false, reason: caught instanceof Error ? caught.message : String(caught) };
+    }
+  }, [stop]);
+
+  const prepare = useCallback(() => {
+    stop();
+    if (!enabledRef.current) return;
+    const audio = audioRef.current ?? new Audio();
+    audio.preload = "auto";
+    (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+    audioRef.current = audio;
+    unlockAudioElement(audio);
   }, [stop]);
 
   const speak = useCallback(async (text: string) => {
@@ -145,16 +165,17 @@ export function useChatReplySpeech({
   }, [releaseCurrent]);
 
   useEffect(() => {
-    enabledRef.current = false;
-    setEnabled(false);
     stop();
   }, [contextKey, stop]);
 
+  useEffect(() => {
+    if (!enabled) stop();
+  }, [enabled, stop]);
+
   useEffect(() => () => {
-    enabledRef.current = false;
     sequenceRef.current += 1;
     releaseCurrent();
   }, [releaseCurrent]);
 
-  return { enabled, phase, toggle, speak, stop };
+  return { enabled, phase, toggle, prepare, speak, stop };
 }

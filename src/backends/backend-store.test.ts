@@ -101,6 +101,27 @@ describe("exportBackends", () => {
     unsubscribe();
   });
 
+  it("localStorage 写失败时不更新缓存，也不通知保存成功", () => {
+    const before = loadBackendState();
+    const listener = vi.fn();
+    const unsubscribe = subscribeBackends(listener);
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    const backend = createBackend({ name: "无法保存", baseURL: "https://blocked.example/v1" });
+
+    expect(() => importBackends(JSON.stringify({
+      version: 1,
+      backends: [backend],
+      activeBackendId: backend.id,
+    }), { replace: true })).toThrow("浏览器未能保存后端配置");
+    expect(loadBackendState()).toBe(before);
+    expect(listener).not.toHaveBeenCalled();
+
+    setItem.mockRestore();
+    unsubscribe();
+  });
+
   it("按 includeKeys 同时脱敏或保留后端与独立 STT 密钥", () => {
     const backend = createBackend({
       id: "voice-backend",

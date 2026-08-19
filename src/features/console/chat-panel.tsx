@@ -136,6 +136,7 @@ export function ChatPanel({
   const abortRef = useRef<AbortController | null>(null);
   const sttAbortRef = useRef<AbortController | null>(null);
   const streamSnapshotRef = useRef<ChatStreamSnapshot | null>(null);
+  const streamFrameRef = useRef<number | null>(null);
   const requestSequenceRef = useRef(0);
   const sttSequenceRef = useRef(0);
   const inputRef = useRef(input);
@@ -159,6 +160,12 @@ export function ChatPanel({
     onCommit(next);
   }, [onCommit]);
 
+  const cancelStreamFrame = useCallback(() => {
+    if (streamFrameRef.current === null) return;
+    cancelAnimationFrame(streamFrameRef.current);
+    streamFrameRef.current = null;
+  }, []);
+
   // 草稿属于当前会话。切换历史时丢掉尚未发送的图片，避免误发到另一段对话。
   useEffect(() => {
     setInput("");
@@ -176,6 +183,7 @@ export function ChatPanel({
     dragDepthRef.current = 0;
     readingImageStatsRef.current = { count: 0, bytes: 0 };
     streamSnapshotRef.current = null;
+    cancelStreamFrame();
 
     return () => {
       // 切会话、删当前会话或切后端时，旧请求不能再把旧会话写回当前界面。
@@ -186,8 +194,9 @@ export function ChatPanel({
       sttSequenceRef.current += 1;
       sttAbortRef.current?.abort();
       sttAbortRef.current = null;
+      cancelStreamFrame();
     };
-  }, [backend.id, session.id]);
+  }, [backend.id, cancelStreamFrame, session.id]);
 
   const model = models.some((item) => item.id === session.model) ? session.model : models[0]?.id ?? "";
   const activeModel = models.find((item) => item.id === model);
@@ -462,6 +471,7 @@ export function ChatPanel({
     const controller = new AbortController();
     abortRef.current = controller;
     const initialSnapshot: ChatStreamSnapshot = { text: "", reasoning: "", tools: [] };
+    cancelStreamFrame();
     streamSnapshotRef.current = initialSnapshot;
     setError("");
     setStreaming(initialSnapshot);
@@ -486,7 +496,13 @@ export function ChatPanel({
         onUpdate: (snapshot) => {
           if (!isCurrentRequest()) return;
           streamSnapshotRef.current = snapshot;
-          setStreaming(snapshot);
+          if (streamFrameRef.current !== null) return;
+          streamFrameRef.current = requestAnimationFrame(() => {
+            streamFrameRef.current = null;
+            if (!isCurrentRequest()) return;
+            const latest = streamSnapshotRef.current;
+            if (latest) setStreaming(latest);
+          });
         },
         signal: controller.signal,
       });
@@ -531,11 +547,26 @@ export function ChatPanel({
       }
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
-      // 用户消息也要留住，否则报错后输入的内容就白打了
-      commitSession(mergeSessionMessages(base, latestSessionRef.current, messages));
+      // 用户消息和报错前已经收到的回复都要留住。
+      const snapshot = streamSnapshotRef.current;
+      const retainedMessages = snapshot && (snapshot.text || snapshot.reasoning || snapshot.tools.length > 0)
+        ? [
+            ...messages,
+            {
+              id: createMessageId(),
+              role: "assistant" as const,
+              content: snapshot.text,
+              reasoning: snapshot.reasoning || undefined,
+              tools: snapshot.tools.length > 0 ? snapshot.tools : undefined,
+              nativeFinishReason: snapshot.nativeFinishReason,
+            },
+          ]
+        : messages;
+      commitSession(mergeSessionMessages(base, latestSessionRef.current, retainedMessages));
       return { status: "failed", text: "", error: message };
     } finally {
       if (requestSequenceRef.current === sequence) {
+        cancelStreamFrame();
         abortRef.current = null;
         streamSnapshotRef.current = null;
         setStreaming(null);
@@ -656,7 +687,7 @@ export function ChatPanel({
     const base = { ...session, model, messages, updatedAt: Date.now() };
     if (settings.clearInputAfterSubmit) setInput("");
     setPendingImages([]);
-    chatReplySpeech.stop();
+    chatReplySpeech.prepare();
     // 先落盘再请求：发送后的图片立即可见，首个响应片段前停止也不会丢消息。
     commitSession(base);
     void send(messages, base).then(speakCompletedChatReply);
@@ -712,7 +743,7 @@ export function ChatPanel({
     const kept = session.messages.slice(0, target.role === "user" ? index + 1 : index);
     if (kept.length === 0) return;
     const base = { ...session, model };
-    chatReplySpeech.stop();
+    chatReplySpeech.prepare();
     void send(kept, base).then(speakCompletedChatReply);
   }
 
