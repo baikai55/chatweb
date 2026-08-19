@@ -450,11 +450,19 @@ async function consumeStream(response: Response, onUpdate?: (snapshot: ChatStrea
     const choice = choices.length > 0 && isRecord(choices[0]) ? choices[0] : undefined;
     if (!choice) continue;
 
-    const native = firstString(choice.native_finish_reason, payload.native_finish_reason);
-    if (native) nativeFinishReason = native;
+    const finishReason = firstString(
+      choice.finish_reason,
+      payload.finish_reason,
+      choice.native_finish_reason,
+      payload.native_finish_reason,
+    );
+    if (finishReason) nativeFinishReason = finishReason;
 
     const delta = isRecord(choice.delta) ? choice.delta : undefined;
-    if (!delta) continue;
+    if (!delta) {
+      if (finishReason) break;
+      continue;
+    }
 
     // 标准流式响应是字符串；少数兼容层会把增量包成 text part，
     // 与非流式 message.content 的多模态形状保持同一套解包逻辑。
@@ -469,6 +477,9 @@ async function consumeStream(response: Response, onUpdate?: (snapshot: ChatStrea
     }
 
     onUpdate?.(snapshot());
+    // 兼容不发送 [DONE]、但会发标准 finish_reason 的上游，避免移动端
+    // 一直等到底层连接关闭后才开始朗读。
+    if (finishReason) break;
   }
 
   if (!text.trim() && !reasoning.trim() && tools.size === 0) {

@@ -14,6 +14,16 @@ function sseResponse(frames: unknown[]): Response {
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
+function openEndedSSEResponse(frames: unknown[]): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")));
+    },
+  });
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 function jsonResponse(message: Record<string, unknown>): Response {
   return Response.json({ choices: [{ message }] });
 }
@@ -42,6 +52,17 @@ describe("聊天请求头", () => {
     const headers = new Headers(init?.headers);
     expect(headers.has("authorization")).toBe(false);
     expect(headers.get("content-type")).toBe("application/json");
+  });
+});
+
+describe("流式结束判定", () => {
+  it("收到 finish_reason 后不等待上游关闭没有 DONE 的连接", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(openEndedSSEResponse([
+      { choices: [{ delta: { content: "及时回复" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    await expect(streamChatCompletions(options())).resolves.toMatchObject({ text: "及时回复" });
   });
 });
 
