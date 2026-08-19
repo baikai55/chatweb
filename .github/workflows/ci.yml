@@ -42,5 +42,11 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser smoke test
+        run: pnpm exec playwright test
+
       - name: Audit dependencies
         run: pnpm audit --audit-level moderate

@@ -59,15 +59,27 @@ gzip 234 KB。入口仍超过 500 KB，后续需继续拆聊天和共享传输�
 最终验证：`pnpm check`、`pnpm test`（36 个文件、317 个用例）、`pnpm build`、
 `git diff --check` 均通过。构建仍只有主聊天包超过 500 KB 的提示。
 
+### 第四轮已完成
+
+1. **核心浏览器冒烟**：新增 Playwright Chromium 测试，覆盖从空状态添加后端、手动获取并
+   保存模型、发送消息和接收 SSE 流式回复。测试只放行本地静态资源与显式 mock 路径，
+   CPA、grok2api、Worker API 和其他未知网络请求都会被阻断并导致失败。
+2. **CI 浏览器回归**：GitHub Actions 在生产构建后安装 Chromium 并执行冒烟；Playwright
+   配置和 E2E 用例同时纳入 TypeScript 检查，测试报告与失败产物不进仓库。
+
+最终验证：`pnpm check`、`pnpm test`（36 个文件、317 个用例）、Playwright Chromium
+（1 个核心流程）、`pnpm build`、`pnpm audit --audit-level moderate`、`git diff --check`
+均通过。生产入口仍约 517 KB / gzip 161 KB，测试依赖没有进入浏览器产物。
+
 ### 后续仍需处理
 
-1. `/__api/auth` 增加部署层或持久化的限流/失败退避，以及 proxy 的持久化配额；前端
-   proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
+1. proxy 的持久化配额与前端 proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
+   `/__api/auth` 限流按当前个人自用要求暂不增加。
 2. Markdown 已补基础 XSS 回归；后续继续扩充浏览器差异与 mXSS 语料，保持无第三方
    脚本，评估 Trusted Types，并尽量收窄 CSP `connect-src`。
-3. 增加 Playwright 自动化冒烟，覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限、
-   流式聊天，以及 Chromium/Safari 的媒体差异；本轮补了移动侧栏组件回归，但真浏览器
-   媒体和跨浏览器行为仍需覆盖。
+3. Playwright 已增加 Chromium 核心冒烟，严格阻断真实 API 并覆盖添加后端、获取/保存模型和
+   流式聊天；后续继续覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限，以及 Safari
+   的媒体差异。
 4. 拆分 `settings-view.tsx`、`chat-panel.tsx`、`voice-panel.tsx` 等大组件时，优先提取
    业务 controller hook 和状态机，不要只搬 JSX。整理 transport 的 URL、模板、JSON path
    等共享依赖，并为 `Backend` 配置设计显式 schema 版本迁移。

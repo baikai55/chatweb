@@ -247,7 +247,10 @@ pnpm dev:worker       # wrangler，端口 8787（函数搜索、上传和反代�
 pnpm check            # 类型检查
 pnpm test             # vitest，测试会 mock 网络，不访问真实服务
 pnpm build            # 产出 dist/
+pnpm test:e2e         # 构建后用 Chromium 跑严格断网 mock 的核心浏览器冒烟
 ```
+
+首次在新机器运行浏览器冒烟前执行 `pnpm exec playwright install chromium`。测试只允许访问本地预览页和内置 mock 路径，任何 CPA、grok2api、Worker API 或其他外部请求都会被阻断并使测试失败。
 
 前端开发时 `/__api` 会被 Vite 代理到本地 wrangler；聊天请求（包括内联图片）直接打你配置的后端，不经过任何代理，也不依赖 R2 上传。生图和语音请求同样直连后端。函数搜索调用 `/__api/search`；涉及图片或视频源文件的视频任务调用 `/__api/upload`，这两种情况都要同时运行 `pnpm dev:worker`。把 `.dev.vars.example` 复制为 `.dev.vars` 后，示例里的 `ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD=true` 只为本地开发免去访问口令；不要照搬到公开生产环境。
 
