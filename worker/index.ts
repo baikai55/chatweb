@@ -1,6 +1,8 @@
 import {
   hasTokenAccessSettings,
+  isAnonymousSameOriginSearchUploadEnabled,
   isProxyModeConfigured,
+  isSearchUploadAccessConfigured,
   isTokenAccessConfigured,
   issueToken,
   readBearer,
@@ -49,14 +51,15 @@ export default {
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const path = url.pathname.slice("/__api".length);
   const now = Math.floor(Date.now() / 1000);
+  const searchUploadAvailable = isSearchUploadAccessConfigured(env);
 
   // 公开：告诉前端服务端有没有预置后端。绝不返回 key。
   if (path === "/config" && request.method === "GET") {
     return json({
       proxyAvailable: isProxyModeConfigured(env),
-      searchAvailable: true,
+      searchAvailable: searchUploadAvailable,
       authRequired: hasTokenAccessSettings(env),
-      uploadAvailable: Boolean(env.MEDIA),
+      uploadAvailable: Boolean(env.MEDIA) && searchUploadAvailable,
       name: env.UPSTREAM_NAME ?? "",
       capabilities: (env.UPSTREAM_CAPABILITIES ?? "")
         .split(",")
@@ -98,8 +101,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleMediaRead(path.slice("/media/".length), env);
   }
 
-  // 以下都要鉴权
-  const authorized = await isAuthorized(request, env, now);
+  // 服务端密钥代理无条件要求有效 token，绝不接受浏览器来源头代替认证。
+  if (path.startsWith("/proxy/")) {
+    const authorized = isTokenAccessConfigured(env)
+      && await verifyToken(env, readBearer(request), now);
+    if (!authorized) return json({ error: "未授权" }, 401);
+    return handleProxy(request, env, path.slice("/proxy".length));
+  }
+
+  // 搜索/上传可选择 token，或显式开启的匿名严格同源模式。
+  const authorized = await isSearchUploadAuthorized(request, env, now);
   if (!authorized) {
     return json({ error: "未授权" }, 401);
   }
@@ -112,27 +123,23 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleSearch(request, env);
   }
 
-  if (path.startsWith("/proxy/")) {
-    return handleProxy(request, env, path.slice("/proxy".length));
-  }
-
   return json({ error: "没有这个接口" }, 404);
 }
 
 /**
  * 鉴权分两种情况：
  *   - 配置了访问口令和签名密钥：必须持有有效 token
- *   - 没配置访问控制：上传和搜索只对可验证的同源请求开放
+ *   - 没配置访问控制：默认拒绝；仅显式开启开关后接受严格同源请求
  *
- * 后者看起来宽松，但这个部署本来就只有你自己在用；真要对外分享就该配上口令。
- * 优先用浏览器生成的 Sec-Fetch-Site；非浏览器请求至少要提供精确匹配的 Origin。
+ * same-site 不等于 same-origin，不能用于这个授权判断。
  */
-async function isAuthorized(request: Request, env: Env, now: number): Promise<boolean> {
+async function isSearchUploadAuthorized(request: Request, env: Env, now: number): Promise<boolean> {
   if (hasTokenAccessSettings(env)) {
     return isTokenAccessConfigured(env) && verifyToken(env, readBearer(request), now);
   }
+  if (!isAnonymousSameOriginSearchUploadEnabled(env)) return false;
   const site = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
-  if (site === "same-origin" || site === "same-site") return true;
+  if (site === "same-origin") return true;
   return request.headers.get("Origin") === new URL(request.url).origin;
 }
 

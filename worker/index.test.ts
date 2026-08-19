@@ -86,21 +86,131 @@ describe("Worker 访问控制", () => {
     expect(malformed.status).toBe(401);
   });
 
-  it("未启用 token 时，缺失 Fetch Metadata 必须提供精确同源 Origin", async () => {
+  it("未启用 token 时匿名搜索/上传默认失败关闭", async () => {
     const env = makeEnv();
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+    const fetchMock = vi.fn(async () => Response.json({
       AbstractText: "origin result",
       Heading: "Origin",
       AbstractURL: "https://example.com/origin",
-    })));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
-    const missingHeaders = await worker.fetch(searchRequest(), env);
-    const wrongOrigin = await worker.fetch(searchRequest({ origin: "https://evil.example" }), env);
+    const configResponse = await worker.fetch(new Request("https://chat.example/__api/config"), env);
+    const sameOriginMetadata = await worker.fetch(searchRequest({ "sec-fetch-site": "same-origin" }), env);
     const exactOrigin = await worker.fetch(searchRequest({ origin: "https://chat.example" }), env);
 
+    await expect(configResponse.json()).resolves.toMatchObject({
+      searchAvailable: false,
+      uploadAvailable: false,
+    });
+    expect(sameOriginMetadata.status).toBe(401);
+    expect(exactOrigin.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("显式匿名开关只接受 same-origin 或精确 Origin，不接受 same-site", async () => {
+    const env = makeEnv({ ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true" });
+    const fetchMock = vi.fn(async () => Response.json({
+      AbstractText: "origin result",
+      Heading: "Origin",
+      AbstractURL: "https://example.com/origin",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const missingHeaders = await worker.fetch(searchRequest(), env);
+    const sameSite = await worker.fetch(searchRequest({ "sec-fetch-site": "same-site" }), env);
+    const wrongOrigin = await worker.fetch(searchRequest({ origin: "https://evil.example" }), env);
+    const exactOrigin = await worker.fetch(searchRequest({ origin: "https://chat.example" }), env);
+    const sameOrigin = await worker.fetch(searchRequest({ "sec-fetch-site": "same-origin" }), env);
+
     expect(missingHeaders.status).toBe(401);
+    expect(sameSite.status).toBe(401);
     expect(wrongOrigin.status).toBe(401);
     expect(exactOrigin.status).toBe(200);
+    expect(sameOrigin.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("服务端密钥 proxy 必须持有有效 token，且响应不开放通配 CORS", async () => {
+    const upstreamOnlyEnv = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      UPSTREAM_BASE_URL: "https://upstream.example/v1",
+      UPSTREAM_API_KEY: "upstream-key",
+    });
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response("upstream", {
+      headers: {
+        "content-type": "text/plain",
+        "access-control-allow-origin": "*",
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const anonymous = await worker.fetch(proxyRequest({ "sec-fetch-site": "same-origin" }), upstreamOnlyEnv);
+    expect(anonymous.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const protectedEnv = makeEnv({
+      ACCESS_PASSWORD: "password",
+      TOKEN_SECRET: "a-long-token-secret",
+      UPSTREAM_BASE_URL: "https://upstream.example/v1",
+      UPSTREAM_API_KEY: "upstream-key",
+    });
+    const missingToken = await worker.fetch(proxyRequest({ "sec-fetch-site": "same-origin" }), protectedEnv);
+    const token = await issueToken(protectedEnv, Math.floor(Date.now() / 1000));
+    const allowed = await worker.fetch(proxyRequest({
+      authorization: `Bearer ${token}`,
+      origin: "https://evil.example",
+    }), protectedEnv);
+
+    expect(missingToken.status).toBe(401);
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get("access-control-allow-origin")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://upstream.example/v1/models");
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer upstream-key");
+  });
+
+  it("上传在缺失 Content-Length 时按实际流入字节执行硬上限", async () => {
+    const put = vi.fn();
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "8",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
+    const request = streamingBytesRequest("https://chat.example/__api/upload", bytes, {
+      "content-type": "image/png",
+      "sec-fetch-site": "same-origin",
+    });
+
+    expect(request.headers.get("content-length")).toBeNull();
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(413);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("multipart 上传体也受文件上限加固定封装开销的硬限制", async () => {
+    const put = vi.fn();
+    const env = makeEnv({
+      ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
+      MAX_UPLOAD_BYTES: "8",
+      MEDIA: { put } as unknown as R2Bucket,
+    });
+    const request = streamingBytesRequest(
+      "https://chat.example/__api/upload",
+      new Uint8Array(8 + 64 * 1024 + 1),
+      {
+        "content-type": "multipart/form-data; boundary=upload-boundary",
+        "sec-fetch-site": "same-origin",
+      },
+    );
+
+    expect(request.headers.get("content-length")).toBeNull();
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(413);
+    expect(put).not.toHaveBeenCalled();
   });
 
   it("认证请求也按实际流入字节执行硬上限", async () => {
@@ -130,18 +240,27 @@ function searchRequest(headers: Record<string, string> = {}): Request {
   });
 }
 
+function proxyRequest(headers: Record<string, string> = {}): Request {
+  return new Request("https://chat.example/__api/proxy/models", { headers });
+}
+
 function streamingRequest(url: string, body: string): Request {
   const bytes = new TextEncoder().encode(body);
+  return streamingBytesRequest(url, bytes, { "content-type": "application/json" });
+}
+
+function streamingBytesRequest(url: string, bytes: Uint8Array, headers: Record<string, string>): Request {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(bytes.subarray(0, 4 * 1024));
-      controller.enqueue(bytes.subarray(4 * 1024));
+      const midpoint = Math.max(1, Math.floor(bytes.byteLength / 2));
+      controller.enqueue(bytes.subarray(0, midpoint));
+      controller.enqueue(bytes.subarray(midpoint));
       controller.close();
     },
   });
   return new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: stream,
     duplex: "half",
   } as RequestInit);

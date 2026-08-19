@@ -57,9 +57,6 @@ export async function handleProxy(request: Request, env: Env, subPath: string): 
   for (const [name, value] of upstream.headers) {
     if (FORWARD_RESPONSE_HEADERS.has(name.toLowerCase())) responseHeaders.set(name, value);
   }
-  // 同源访问，但显式补上省得反代链路上有中间层多事
-  responseHeaders.set("Access-Control-Allow-Origin", "*");
-  responseHeaders.set("Access-Control-Max-Age", "86400");
   // SSE 绝不能被缓冲，否则前端要等整个响应结束才看到第一个字
   if (upstream.headers.get("content-type")?.includes("text/event-stream")) {
     responseHeaders.set("Cache-Control", "no-cache, no-transform");

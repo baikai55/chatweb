@@ -18,6 +18,7 @@ export type Env = {
   UPSTREAM_API_KEY?: string;
   ACCESS_PASSWORD?: string;
   TOKEN_SECRET?: string;
+  ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD?: string;
   MAX_UPLOAD_BYTES?: string;
   MEDIA_CACHE_SECONDS?: string;
   SEARCH_PROVIDER?: string;
@@ -34,6 +35,17 @@ export function isTokenAccessConfigured(env: Env): boolean {
 /** 两项只配了一项也算启用了访问控制，路由必须失败关闭。 */
 export function hasTokenAccessSettings(env: Env): boolean {
   return Boolean(env.ACCESS_PASSWORD || env.TOKEN_SECRET);
+}
+
+/** 未配置 token 时，是否显式允许匿名的严格同源搜索/上传。默认关闭。 */
+export function isAnonymousSameOriginSearchUploadEnabled(env: Env): boolean {
+  return env.ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD?.trim().toLowerCase() === "true";
+}
+
+/** 搜索/上传是否存在一条可用且配置完整的访问路径。 */
+export function isSearchUploadAccessConfigured(env: Env): boolean {
+  if (hasTokenAccessSettings(env)) return isTokenAccessConfigured(env);
+  return isAnonymousSameOriginSearchUploadEnabled(env);
 }
 
 /** 服务端密钥代理是否可用。四样缺一不可。 */

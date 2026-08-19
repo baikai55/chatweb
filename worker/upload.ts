@@ -1,4 +1,5 @@
 import type { Env } from "./auth";
+import { BodyTooLargeError, readBodyWithLimit } from "./body";
 
 /**
  * R2 上传通道。
@@ -13,6 +14,7 @@ import type { Env } from "./auth";
 
 const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_CACHE_SECONDS = 7 * 24 * 60 * 60;
+const MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
 /** 只认这些类型，且按魔数校验而不是只看 Content-Type。 */
 const MAGIC_SIGNATURES: Array<{ ext: string; mime: string; test: (bytes: Uint8Array) => boolean }> = [
@@ -35,14 +37,20 @@ export async function handleUpload(request: Request, env: Env, origin: string): 
     return json({ error: "服务端没有配置 R2 存储桶，无法上传" }, 501);
   }
 
-  const maxBytes = Number(env.MAX_UPLOAD_BYTES ?? DEFAULT_MAX_UPLOAD_BYTES) || DEFAULT_MAX_UPLOAD_BYTES;
+  const configuredMaxBytes = Number(env.MAX_UPLOAD_BYTES ?? DEFAULT_MAX_UPLOAD_BYTES);
+  const maxBytes = Number.isSafeInteger(configuredMaxBytes) && configuredMaxBytes > 0
+    ? configuredMaxBytes
+    : DEFAULT_MAX_UPLOAD_BYTES;
 
-  const declaredLength = Number(request.headers.get("Content-Length") ?? "0");
-  if (declaredLength > maxBytes) {
-    return json({ error: `文件超过上限 ${Math.round(maxBytes / 1024 / 1024)}MB` }, 413);
+  let file: ArrayBuffer | null;
+  try {
+    file = await readFile(request, maxBytes);
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      return json({ error: `文件超过上限 ${Math.round(maxBytes / 1024 / 1024)}MB` }, 413);
+    }
+    throw error;
   }
-
-  const file = await readFile(request);
   if (!file) return json({ error: "请求里没有找到文件" }, 400);
   if (file.byteLength === 0) return json({ error: "文件是空的" }, 400);
   if (file.byteLength > maxBytes) {
@@ -90,15 +98,24 @@ export async function handleMediaRead(key: string, env: Env): Promise<Response> 
 }
 
 /** 同时接受 multipart 表单和裸 body。手机端 <input type="file"> 走 multipart。 */
-async function readFile(request: Request): Promise<ArrayBuffer | null> {
+async function readFile(request: Request, maxBytes: number): Promise<ArrayBuffer | null> {
   const contentType = request.headers.get("Content-Type") ?? "";
-  if (contentType.includes("multipart/form-data")) {
-    const form = await request.formData();
+  if (contentType.toLowerCase().includes("multipart/form-data")) {
+    // multipart 有 boundary 和字段头开销，但整个请求体仍受固定硬上限约束。
+    const requestLimit = Math.min(Number.MAX_SAFE_INTEGER, maxBytes + MAX_MULTIPART_OVERHEAD_BYTES);
+    const requestBytes = await readBodyWithLimit(
+      request.body,
+      request.headers,
+      requestLimit,
+    );
+    const form = await new Response(requestBytes, {
+      headers: { "Content-Type": contentType },
+    }).formData();
     const entry = form.get("file") ?? form.get("image") ?? form.get("video");
     if (entry instanceof File) return entry.arrayBuffer();
     return null;
   }
-  return request.arrayBuffer();
+  return readBodyWithLimit(request.body, request.headers, maxBytes);
 }
 
 function detectType(head: Uint8Array): { ext: string; mime: string } | null {

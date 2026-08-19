@@ -16,7 +16,7 @@ export class InvalidJsonBodyError extends Error {
 export async function readJsonBodyWithLimit(request: Request, maxBytes: number): Promise<unknown> {
   let text: string;
   try {
-    text = await readTextBodyWithLimit(request.body, request.headers, maxBytes);
+    text = decodeUtf8(await readBodyWithLimit(request.body, request.headers, maxBytes));
   } catch (error) {
     if (error instanceof BodyTooLargeError) throw error;
     throw new InvalidJsonBodyError();
@@ -31,14 +31,15 @@ export async function readJsonBodyWithLimit(request: Request, maxBytes: number):
 }
 
 export async function readResponseTextWithLimit(response: Response, maxBytes: number): Promise<string> {
-  return readTextBodyWithLimit(response.body, response.headers, maxBytes);
+  return decodeUtf8(await readBodyWithLimit(response.body, response.headers, maxBytes));
 }
 
-async function readTextBodyWithLimit(
+/** 按实际流入字节读取请求体，并在超过上限时立即取消流。 */
+export async function readBodyWithLimit(
   body: ReadableStream<Uint8Array> | null,
   headers: Headers,
   maxBytes: number,
-): Promise<string> {
+): Promise<ArrayBuffer> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError("maxBytes must be a positive integer");
 
   const declaredLength = parseContentLength(headers.get("Content-Length"));
@@ -46,7 +47,7 @@ async function readTextBodyWithLimit(
     await cancelBody(body);
     throw new BodyTooLargeError();
   }
-  if (!body) return "";
+  if (!body) return new ArrayBuffer(0);
 
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
@@ -72,6 +73,10 @@ async function readTextBodyWithLimit(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  return bytes.buffer;
+}
+
+function decodeUtf8(bytes: ArrayBuffer): string {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
 }
 

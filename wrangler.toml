@@ -26,6 +26,12 @@ binding = "MEDIA"
 bucket_name = "chatweb"
 
 [vars]
+# —— Worker API 访问控制 ——
+# 当前部署明确为个人自用，因此允许匿名的严格同源搜索/上传。
+# 如果以后分享或公开部署，应改回 false，并设置 ACCESS_PASSWORD + TOKEN_SECRET。
+# 来源头不是身份认证，非浏览器客户端可以伪造；本开关不会开放服务端密钥 proxy。
+ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD = "true"
+
 # —— 服务端密钥模式（可选）——
 # Worker 已提供 /__api/config、/__api/auth 和 /__api/proxy/*；
 # 当前前端尚未读取预置配置或创建 proxy 后端，填写这些变量只是在服务端准备接口。

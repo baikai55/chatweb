@@ -136,7 +136,9 @@ CPA 一个部署实测就有 68 个模型（还会继续涨），全塞进下拉
 
 浏览器选择 `auto` 时不会覆盖部署者设置的 `SEARCH_PROVIDER`；Worker 未指定该变量时才使用表中的自动兜底顺序。
 
-部署设置了 `ACCESS_PASSWORD` 和 `TOKEN_SECRET` 后，搜索、上传和代理都要求先在「设置 → 联网」验证 Worker 访问口令。明文口令不会保存；换取的 12 小时 token 只存在当前标签页。两项都不配置时，搜索和上传只接受浏览器可验证的同源/同站请求，或 `Origin` 与 Worker 精确一致的请求；只配置其中一项会失败关闭。
+Worker 代码在没有明确配置时会让搜索和上传失败关闭。当前仓库的 `wrangler.toml` 按个人自用场景显式设置了 `ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD=true`，因此部署后搜索和上传不需要输入访问口令。
+
+`Origin` / `Sec-Fetch-Site` 只能降低跨站请求风险，不是可靠身份认证，非浏览器客户端仍可伪造。如果以后要分享或公开部署，应把该开关改回 `false`，同时设置 `ACCESS_PASSWORD` 和 `TOKEN_SECRET`，然后在「设置 → 联网」验证 Worker 访问口令。这个开关永远不会开放服务端密钥代理；`/__api/proxy/*` 始终要求完整访问控制和有效 token。
 
 ## 语音输入与录音
 
@@ -245,7 +247,7 @@ pnpm test             # vitest，测试会 mock 网络，不访问真实服务
 pnpm build            # 产出 dist/
 ```
 
-前端开发时 `/__api` 会被 Vite 代理到本地 wrangler；聊天请求（包括内联图片）直接打你配置的后端，不经过任何代理，也不依赖 R2 上传。生图和语音请求同样直连后端。函数搜索调用 `/__api/search`；涉及图片或视频源文件的视频任务调用 `/__api/upload`，这两种情况都要同时运行 `pnpm dev:worker`。
+前端开发时 `/__api` 会被 Vite 代理到本地 wrangler；聊天请求（包括内联图片）直接打你配置的后端，不经过任何代理，也不依赖 R2 上传。生图和语音请求同样直连后端。函数搜索调用 `/__api/search`；涉及图片或视频源文件的视频任务调用 `/__api/upload`，这两种情况都要同时运行 `pnpm dev:worker`。把 `.dev.vars.example` 复制为 `.dev.vars` 后，示例里的 `ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD=true` 只为本地开发免去访问口令；不要照搬到公开生产环境。
 
 ## 部署
 
@@ -256,10 +258,11 @@ wrangler r2 bucket create chatweb
 pnpm deploy
 ```
 
-免费函数搜索不需要 secret。按部署方式补充配置：
+免费搜索源不需要 `SEARCH_API_KEY`，但 Worker API 仍需要访问控制。按部署方式补充配置：
 
 | 配置 | 类型 | 用途 |
 |---|---|---|
+| `ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD` | Worker variable | 当前个人部署为 `true`，搜索/上传不需要口令；分享或公开前改为 `false`，且不会开放 proxy |
 | `UPSTREAM_BASE_URL`、`UPSTREAM_NAME` | Worker variable | `/__api/config` 和代理使用的后端地址/名称；等待前端接入 |
 | `UPSTREAM_CAPABILITIES` | Worker variable | `/__api/config` 返回的面板列表；等待前端接入，不会自动探测 |
 | `UPSTREAM_API_KEY` | secret | Worker 代用户持有的上游 API key |
@@ -293,7 +296,7 @@ wrangler secret put SEARCH_API_KEY     # 仅 Tavily/Serper 时需要
 | 现象 | 原因和处理 |
 |---|---|
 | DeepSeek 返回 `unknown variant 'web_search', expected 'function'` | 当前模型走了原生搜索；到「设置 → 模型」把它切成「函数」 |
-| 函数搜索显示 401 或“未授权” | 部署启用了访问控制；到「设置 → 联网」验证 Worker 访问口令 |
+| 函数搜索显示 401 或“未授权” | 当前个人部署应确认 `wrangler.toml` / `.dev.vars` 的匿名严格同源开关已生效并重新部署/启动；公开部署关闭该开关后，需到「设置 → 联网」验证 Worker 访问口令 |
 | 本地函数搜索或上传返回 404 | 只启动了 Vite；同时运行 `pnpm dev:worker`，确认 Vite 的 `/__api` 代理指向 8787 |
 | 打开函数搜索但没有工具活动 | 是否搜索由模型决定；明确要求查询最新资料，并确认当前模型的联网方式是「函数」 |
 | 显示调用了 `web_search` 但结果为空/超时 | 在 Network 检查 `/__api/search` 的 provider 和错误；可暂时把来源固定为 `exa` 定位。`SEARCH_TIMEOUT_MS` 是整个 auto 兜底链共享的总预算 |

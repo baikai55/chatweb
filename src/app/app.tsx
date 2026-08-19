@@ -1,11 +1,12 @@
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import {
   applyBackendConfig,
   isCatalogStale,
@@ -21,14 +22,12 @@ import { createBackend, normalizeBaseURL, type Backend } from "@/backends/types"
 import { AppShell, type ConsoleMode } from "@/app/app-shell";
 import { ChatPanel } from "@/features/console/chat-panel";
 import { useChatSessions } from "@/features/console/use-chat-sessions";
-import { ImagePanel } from "@/features/image/image-panel";
-import {
-  SettingsView,
-  type BackendCatalogState,
-  type ModelDraft,
-} from "@/features/settings/settings-view";
-import { VideoPanel } from "@/features/video/video-panel";
-import { VoicePanel } from "@/features/voice/voice-panel";
+import type { BackendCatalogState, ModelDraft } from "@/features/settings/settings-view";
+
+const SettingsView = lazy(() => import("@/features/settings/settings-view").then((module) => ({ default: module.SettingsView })));
+const ImagePanel = lazy(() => import("@/features/image/image-panel").then((module) => ({ default: module.ImagePanel })));
+const VideoPanel = lazy(() => import("@/features/video/video-panel").then((module) => ({ default: module.VideoPanel })));
+const VoicePanel = lazy(() => import("@/features/voice/voice-panel").then((module) => ({ default: module.VoicePanel })));
 
 export function App() {
   const { backends, active, save, remove, patch, activate } = useBackends();
@@ -163,6 +162,21 @@ function Console({
   const chatModels = modelsForKind(saved, "chat");
   const chat = useChatSessions(backend.id, chatModels[0]?.id ?? "", historyToken);
 
+  useEffect(() => {
+    const failure = chat.persistenceError;
+    if (!failure) return;
+    const messages: Record<typeof failure.operation, string> = {
+      load: "聊天历史读取失败，本次仍可继续聊天",
+      save: "对话未能保存，刷新页面后可能丢失",
+      delete: "删除未能写入浏览器存储，刷新后记录可能恢复",
+      clear: "清空未能写入浏览器存储，刷新后记录可能恢复",
+      prune: "旧聊天记录清理失败，请检查浏览器存储空间",
+    };
+    console.error(`聊天历史持久化失败（${failure.operation}）`, failure.error);
+    toast.error(messages[failure.operation]);
+    chat.clearPersistenceError();
+  }, [chat.clearPersistenceError, chat.persistenceError]);
+
   return (
     <AppShell
       backend={backend}
@@ -200,62 +214,72 @@ function Console({
         setSettingsOpen(false);
       }}
     >
-      {settingsOpen ? (
-        <SettingsView
-          backend={backend}
-          backends={backends}
-          models={decorated}
-          catalogsByBackendId={catalogsByBackendId}
-          fetchedAt={activeCatalog.fetchedAt}
-          stale={activeCatalog.stale}
-          fetchingBackendId={fetchModels.isPending ? fetchModels.variables ?? null : null}
-          fetchErrorsByBackendId={fetchErrors}
-          fetchBlocked={fetchModels.isPending}
-          loading={fetchModels.isPending && fetchModels.variables === backend.id}
-          error={fetchErrors[backend.id] ?? ""}
-          onFetchModels={() => fetchModels.mutate(backend.id)}
-          onFetchBackendModels={(backendId) => fetchModels.mutate(backendId)}
-          onPatch={onPatch}
-          onPatchBackend={onPatchBackend}
-          onRemove={onRemove}
-          onAdd={onAdd}
-          draft={modelDraft}
-          onDraftChange={setModelDraft}
-          onDataCleared={() => setHistoryToken((value) => value + 1)}
-        />
-      ) : mode === "chat" ? (
-        <ChatPanel
-          backend={backend}
-          backends={backends}
-          models={chatModels}
-          session={chat.current}
-          onCommit={chat.commit}
-          onManage={() => setSettingsOpen(true)}
-          onVoiceCallActiveChange={setVoiceCallActive}
-        />
-      ) : mode === "image" ? (
-        <ImagePanel
-          key={backend.id}
-          backend={backend}
-          models={saved}
-          onManage={() => setSettingsOpen(true)}
-        />
-      ) : mode === "video" ? (
-        <VideoPanel
-          backend={backend}
-          models={saved}
-          onManage={() => setSettingsOpen(true)}
-        />
-      ) : (
-        <VoicePanel
-          backend={backend}
-          backends={backends}
-          catalogsByBackendId={catalogsByBackendId}
-          models={saved}
-          onManage={() => setSettingsOpen(true)}
-        />
-      )}
+      <Suspense fallback={<PanelLoading />}>
+        {settingsOpen ? (
+          <SettingsView
+            backend={backend}
+            backends={backends}
+            models={decorated}
+            catalogsByBackendId={catalogsByBackendId}
+            fetchedAt={activeCatalog.fetchedAt}
+            stale={activeCatalog.stale}
+            fetchingBackendId={fetchModels.isPending ? fetchModels.variables ?? null : null}
+            fetchErrorsByBackendId={fetchErrors}
+            fetchBlocked={fetchModels.isPending}
+            loading={fetchModels.isPending && fetchModels.variables === backend.id}
+            error={fetchErrors[backend.id] ?? ""}
+            onFetchModels={() => fetchModels.mutate(backend.id)}
+            onFetchBackendModels={(backendId) => fetchModels.mutate(backendId)}
+            onPatch={onPatch}
+            onPatchBackend={onPatchBackend}
+            onRemove={onRemove}
+            onAdd={onAdd}
+            draft={modelDraft}
+            onDraftChange={setModelDraft}
+            onDataCleared={() => setHistoryToken((value) => value + 1)}
+          />
+        ) : mode === "chat" ? (
+          <ChatPanel
+            backend={backend}
+            backends={backends}
+            models={chatModels}
+            session={chat.current}
+            onCommit={chat.commit}
+            onManage={() => setSettingsOpen(true)}
+            onVoiceCallActiveChange={setVoiceCallActive}
+          />
+        ) : mode === "image" ? (
+          <ImagePanel
+            key={backend.id}
+            backend={backend}
+            models={saved}
+            onManage={() => setSettingsOpen(true)}
+          />
+        ) : mode === "video" ? (
+          <VideoPanel
+            backend={backend}
+            models={saved}
+            onManage={() => setSettingsOpen(true)}
+          />
+        ) : (
+          <VoicePanel
+            backend={backend}
+            backends={backends}
+            catalogsByBackendId={catalogsByBackendId}
+            models={saved}
+            onManage={() => setSettingsOpen(true)}
+          />
+        )}
+      </Suspense>
     </AppShell>
+  );
+}
+
+function PanelLoading() {
+  return (
+    <div className="flex h-full items-center justify-center" aria-live="polite">
+      <Spinner className="size-5" />
+    </div>
   );
 }
 

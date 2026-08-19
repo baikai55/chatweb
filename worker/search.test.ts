@@ -287,6 +287,7 @@ describe("搜索地址安全校验", () => {
 describe("POST /__api/search", () => {
   const env = {
     ASSETS: { fetch: vi.fn() },
+    ALLOW_ANONYMOUS_SAME_ORIGIN_SEARCH_UPLOAD: "true",
   } as unknown as Env;
 
   it("沿用现有同源鉴权并返回统一搜索结果", async () => {

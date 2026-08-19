@@ -5,6 +5,48 @@
 按时间追加的历史记录，若旧描述与顶部或代码冲突，以顶部和代码为准。本机的
 `C:\Users\99037\.claude\plans\unified-whistling-fox.md` 只是历史资料，不是仓库依赖。
 
+## 2026-08-19 项目审查与整改清单
+
+本轮先做了只读全仓审查。基线结果：`pnpm check`、`pnpm test`（30 个文件、
+276 个用例）、`pnpm build` 均通过，`pnpm audit --audit-level moderate` 未发现已知漏洞；
+但安全边界、异步数据可靠性和浏览器级测试仍落后于功能增长。整改按下面顺序推进，
+不要用组件拆行数或纯样式整理替代高优先级修复。
+
+### 本轮已完成
+
+1. **Worker 访问边界**：未配置 token 时不能再把可伪造的 `Origin` /
+   `Sec-Fetch-Site` 当成生产鉴权；服务端密钥代理必须失败关闭；匿名搜索/上传若保留，
+   必须是显式部署开关。代理响应也不应对任意来源返回 CORS `*`。
+2. **上传内存上限**：不能只信 `Content-Length`，省略或伪造长度时也要按实际流入字节
+   截断，避免在 `formData()` / `arrayBuffer()` 完整缓冲后才判断超限。
+3. **聊天历史竞态**：IndexedDB 首读完成时要与加载期间的新会话合并，不能用旧快照
+   整体覆盖内存状态。持久化失败必须能被上层感知，不能让用户误以为刷新后仍会保留。
+4. **首包分割**：聊天保留首屏，设置、生图、视频、语音改为按需加载；以生产构建产物
+   为准比较体积，不只消除 Vite 警告。
+5. **安全回归与崩溃恢复**：Markdown 清洗新增真实 DOM 的 XSS 回归；顶层 React
+   Error Boundary 在组件渲染失败时提供重载入口，不再整页无提示白屏。
+
+最终验证：`pnpm check`、`pnpm test`（32 个文件、291 个用例）、`pnpm build`、
+`pnpm audit --audit-level moderate`、`git diff --check` 均通过。生产构建把设置、生图、
+视频、语音拆为异步 chunk；首屏 JS 从约 875 KB / gzip 270 KB 降到约 749 KB /
+gzip 234 KB。入口仍超过 500 KB，后续需继续拆聊天和共享传输代码，不能靠调高警告阈值掩盖。
+
+### 后续仍需处理
+
+1. `/__api/auth` 增加部署层或持久化的限流/失败退避；proxy 增加路径、方法、请求体和
+   配额白名单。前端 proxy 模式尚未闭环，完成前不能把它当作现有的安全分享方案。
+2. Markdown 已补基础 XSS 回归；后续继续扩充浏览器差异与 mXSS 语料，保持无第三方
+   脚本，评估 Trusted Types，并尽量收窄 CSP `connect-src`。
+3. 为普通 JSON、建连、音视频下载和轮询补统一总超时；保留用户取消，并区分超时、
+   主动取消和上游错误。
+4. 增加组件和 Playwright 冒烟，覆盖移动端侧栏焦点、键盘操作、PWA 更新、录音权限、
+   流式聊天，以及 Chromium/Safari 的媒体差异；当前单测主要覆盖纯逻辑和传输层。
+5. 拆分 `settings-view.tsx`、`chat-panel.tsx`、`voice-panel.tsx` 等大组件时，优先提取
+   业务 controller hook 和状态机，不要只搬 JSX。整理 transport 的 URL、模板、JSON path
+   等共享依赖，并为 `Backend` 配置设计显式 schema 版本迁移。
+6. 把 R2 lifecycle、`workers_dev`、密钥强度、CI frozen lockfile、Node/pnpm 版本、
+   `check/test/build/audit`、部署回滚和可观测性纳入可验证发布清单。
+
 ## 已完成且验证过
 
 跑过 `pnpm check`、`pnpm test` 和 `pnpm build`，都干净。Worker 用 `wrangler dev` 实跑过。

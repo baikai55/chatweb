@@ -40,7 +40,28 @@ export type ChatSession = {
 };
 
 /** 纯粹的失控保护，正常用不到。 */
-const MAX_SESSIONS_PER_SCOPE = 500;
+export const MAX_SESSIONS_PER_SCOPE = 500;
+
+export type ChatPersistenceOperation = "load" | "save" | "delete" | "clear" | "prune";
+
+export type ChatPersistenceFailure = {
+  ok: false;
+  operation: ChatPersistenceOperation;
+  error: Error;
+};
+
+export type ChatPersistenceResult = { ok: true } | ChatPersistenceFailure;
+
+export function createChatPersistenceFailure(
+  operation: ChatPersistenceOperation,
+  caught: unknown,
+): ChatPersistenceFailure {
+  return {
+    ok: false,
+    operation,
+    error: caught instanceof Error ? caught : new Error(String(caught)),
+  };
+}
 
 export function createMessageId(): string {
   return `m_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -77,32 +98,30 @@ export function deriveSessionTitle(messages: ConversationMessage[]): string {
 
 /** 按更新时间倒序。空会话（一条消息都没有）不返回，避免历史里全是空壳。 */
 export async function loadSessions(scope: string): Promise<ChatSession[]> {
-  try {
-    const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
-    return rows
-      .filter((session) => session.messages.length > 0)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-  } catch {
-    // 隐私模式或数据库打不开。降级成"没有历史"，不影响正常聊天。
-    return [];
-  }
+  const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
+  return rows
+    .filter((session) => session.messages.length > 0)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export async function saveSession(session: ChatSession): Promise<void> {
+export async function saveSession(session: ChatSession): Promise<ChatPersistenceResult> {
   // 一条消息都没有就别落盘了
-  if (session.messages.length === 0) return;
+  if (session.messages.length === 0) return { ok: true };
   try {
     await idbPut(STORE_SESSIONS, session);
-  } catch {
-    // 写失败不该打断对话，内存里的内容仍然可用
+    return { ok: true };
+  } catch (caught) {
+    // 不抛异常打断对话，但必须让 hook / 调用方知道这条记录没有落盘。
+    return createChatPersistenceFailure("save", caught);
   }
 }
 
-export async function deleteSession(id: string): Promise<void> {
+export async function deleteSession(id: string): Promise<ChatPersistenceResult> {
   try {
     await idbDelete(STORE_SESSIONS, id);
-  } catch {
-    // 忽略
+    return { ok: true };
+  } catch (caught) {
+    return createChatPersistenceFailure("delete", caught);
   }
 }
 
@@ -112,26 +131,28 @@ export async function clearAllSessions(): Promise<void> {
 }
 
 /** 只清掉一个后端的会话。侧栏标题旁的「清空」用。 */
-export async function clearScopeSessions(scope: string): Promise<void> {
+export async function clearScopeSessions(scope: string): Promise<ChatPersistenceResult> {
   try {
     const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
     await Promise.all(rows.map((session) => idbDelete(STORE_SESSIONS, session.id)));
-  } catch {
-    // 忽略
+    return { ok: true };
+  } catch (caught) {
+    return createChatPersistenceFailure("clear", caught);
   }
 }
 
 /** 超出上限时清理最旧的。在保存后异步调用即可，不用等它。 */
-export async function pruneSessions(scope: string): Promise<void> {
+export async function pruneSessions(scope: string): Promise<ChatPersistenceResult> {
   try {
     const rows = await idbGetByScope<ChatSession>(STORE_SESSIONS, "byScope", scope);
-    if (rows.length <= MAX_SESSIONS_PER_SCOPE) return;
+    if (rows.length <= MAX_SESSIONS_PER_SCOPE) return { ok: true };
     const excess = rows
       .sort((a, b) => a.updatedAt - b.updatedAt)
       .slice(0, rows.length - MAX_SESSIONS_PER_SCOPE);
     await Promise.all(excess.map((session) => idbDelete(STORE_SESSIONS, session.id)));
-  } catch {
-    // 忽略
+    return { ok: true };
+  } catch (caught) {
+    return createChatPersistenceFailure("prune", caught);
   }
 }
 

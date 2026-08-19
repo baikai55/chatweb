@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { AppErrorBoundary } from "@/app/app-error-boundary";
 import { AppProviders } from "@/app/providers";
 import { App } from "@/app/app";
 import "@/shared/i18n";
@@ -11,9 +12,11 @@ if (!container) throw new Error("找不到 #root 挂载点");
 
 createRoot(container).render(
   <StrictMode>
-    <AppProviders>
-      <App />
-    </AppProviders>
+    <AppErrorBoundary>
+      <AppProviders>
+        <App />
+      </AppProviders>
+    </AppErrorBoundary>
   </StrictMode>,
 );
 
