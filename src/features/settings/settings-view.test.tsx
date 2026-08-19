@@ -7,10 +7,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBackend } from "@/backends/types";
 import {
   BackendSection,
+  CustomTTSRouteSection,
   ImageTimeoutInput,
+  RouteSection,
   SearchSettingsSection,
   clearStoredRecords,
 } from "@/features/settings/settings-view";
+import { BUILTIN_ROUTE_DEFS, draftCustomRoute } from "@/transport/image-routes";
 import { clearWorkerAccessToken, hasWorkerAccessToken } from "@/transport/worker-access";
 
 const toastMocks = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
@@ -141,6 +144,55 @@ describe("删除全部记录", () => {
 
     finishGenerations();
     await expect(clearing).resolves.toEqual({ sessionsCleared: true, generationsCleared: true });
+  });
+});
+
+describe("路由配置写入失败", () => {
+  it("图片路由保存或删除失败时保留编辑草稿且不提示成功", async () => {
+    const route = draftCustomRoute(BUILTIN_ROUTE_DEFS.chat, "custom-chat");
+    const backend = createBackend({
+      name: "图片供应商",
+      baseURL: "https://image.example.test/v1",
+      customImageRoutes: [route],
+    });
+    const onPatch = vi.fn(() => false);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => { root.render(<RouteSection backend={backend} onPatch={onPatch} />); });
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(`[aria-label="编辑 ${route.name}"]`)?.click(); });
+    expect(container.querySelector(`textarea[aria-label="${route.name} 的定义"]`)).not.toBeNull();
+
+    await act(async () => { findButton(container, "保存")?.click(); });
+    expect(container.querySelector(`textarea[aria-label="${route.name} 的定义"]`)).not.toBeNull();
+    expect(toastMocks.success).not.toHaveBeenCalled();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(`[aria-label="删除 ${route.name}"]`)?.click(); });
+    expect(container.querySelector(`textarea[aria-label="${route.name} 的定义"]`)).not.toBeNull();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("MiMo 路由模板创建失败时不进入编辑态也不提示成功", async () => {
+    const backend = createBackend({
+      id: "backend",
+      name: "语音供应商",
+      baseURL: "https://voice.example.test/v1",
+    });
+    const onPatchBackend = vi.fn(() => false);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<CustomTTSRouteSection owner={backend} backends={[backend]} onPatchBackend={onPatchBackend} />);
+    });
+
+    await act(async () => { findButton(container, "新建路由")?.click(); });
+
+    expect(onPatchBackend).toHaveBeenCalledOnce();
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(toastMocks.success).not.toHaveBeenCalled();
+    await act(async () => { root.unmount(); });
   });
 });
 

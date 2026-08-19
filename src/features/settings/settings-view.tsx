@@ -812,11 +812,11 @@ function ModelSection({
 
 /* ── 图片路由 ─────────────────────────────────────────────────────── */
 
-function RouteSection({
+export function RouteSection({
   backend, onPatch,
 }: {
   backend: Backend;
-  onPatch: (changes: Partial<Backend>) => void;
+  onPatch: (changes: Partial<Backend>) => boolean;
 }) {
   const routes = listImageRoutes(backend);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -832,7 +832,7 @@ function RouteSection({
   function addFrom(source: CustomImageRoute): void {
     const id = `route_${Math.random().toString(36).slice(2, 8)}`;
     const created = draftCustomRoute(source, id);
-    onPatch({ customImageRoutes: [...backend.customImageRoutes, created] });
+    if (!onPatch({ customImageRoutes: [...backend.customImageRoutes, created] })) return;
     startEdit(created);
   }
 
@@ -861,7 +861,7 @@ function RouteSection({
       return;
     }
 
-    onPatch({
+    if (!onPatch({
       customImageRoutes: backend.customImageRoutes.map((route) =>
         route.id === editingId ? result.data : route,
       ),
@@ -876,20 +876,20 @@ function RouteSection({
           ),
         }
         : {}),
-    });
+    })) return;
     setEditingId(null);
     setDraftError("");
     toast.success("路由已保存");
   }
 
   function removeRoute(id: string): void {
-    onPatch({
+    if (!onPatch({
       customImageRoutes: backend.customImageRoutes.filter((route) => route.id !== id),
       defaultImageRoute: backend.defaultImageRoute === id ? "images" : backend.defaultImageRoute,
       imageRouteOverrides: Object.fromEntries(
         Object.entries(backend.imageRouteOverrides).filter(([, routeId]) => routeId !== id),
       ),
-    });
+    })) return;
     if (editingId === id) setEditingId(null);
   }
 
@@ -1094,7 +1094,7 @@ function VoiceSettingsSection({
   );
 }
 
-function CustomTTSRouteSection({
+export function CustomTTSRouteSection({
   owner,
   backends,
   onPatchBackend,
@@ -1135,7 +1135,7 @@ function CustomTTSRouteSection({
       audioUrlPaths: [...MIMO_CHAT_TTS_ROUTE.audioUrlPaths],
       audioBase64Paths: [...MIMO_CHAT_TTS_ROUTE.audioBase64Paths],
     };
-    onPatchBackend(target.id, { customTTSRoutes: [...target.customTTSRoutes, created] });
+    if (!onPatchBackend(target.id, { customTTSRoutes: [...target.customTTSRoutes, created] })) return;
     startEdit(created);
     toast.success("已创建 MiMo TTS 路由模板，请检查后保存");
   }
