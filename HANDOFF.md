@@ -688,16 +688,31 @@ grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准
   2026-08 又碰到一次一模一样的（`agnes-image-2.0-flash`），同一个办法解决。
   那次的报错列表比上面这条多了一个 `grok-imagine-image-2.0`，说明这个可用列表
   是 CPA 按当前配置实时生成的，**别把它当成常量抄进代码**。
-- **agnes 经 litellm 转发时不吃 `response_format`**：
-  `UnsupportedParamsError: Setting response_format is not supported by openai,
-  agnes-t2i-general-model. To drop it from the call, set litellm.drop_params = True`。
-  `drop_params` 在 agnes 侧，我们改不了。而 `response_format` 又不像 size/quality
-  那样留空就能被模板剪掉（原来类型是必填的 `"url" | "b64_json"`，永远有值），
-  所以给面板的「返回格式」加了 `不发送` 一档并设为**默认**，
-  对应 `GenerateImagesOptions.responseFormat` 变成可选。
-  同理 `n` 也是必填、永远发；litellm 一次只报一个参数，真撞上了照这个办法处理。
-  代价是不发时上游按自己的默认返（一般是 URL），而 `toAsset` 对远程 URL
-  只存链接不落盘（`generation-store.ts:95`），链接过期历史里就空了 —— 已知，可接受。
+- **图片参数：能不发就不发，别替上游填默认值**。踩了两轮才收敛：
+  - `response_format`：agnes 经 litellm 转发时直接 400 ——
+    `UnsupportedParamsError: Setting response_format is not supported by openai,
+    agnes-t2i-general-model. To drop it from the call, set litellm.drop_params = True`。
+    `drop_params` 在 agnes 侧，我们改不了。而且 OpenAI 自己的 spec 也写着这参数
+    **对 gpt-image 系列根本不支持**（那些模型一律返 base64），所以不发是普遍正确的。
+  - `size`：面板原来默认发 `size: "auto"`，agnes 回 422
+    `{'detail': 'Invalid request (id: req_…)'}` —— 它自己写的校验错误，
+    故意不告诉你哪个字段，只能靠排除法。`auto` 只有"允许自动尺寸的模型"认，
+    dall-e 和多数第三方 t2i 当非法值。spec 里 `size` 的默认值就是 `auto`，
+    所以**不发 ≡ 发 auto**，但不发对所有上游都安全。
+  - 做法：面板的「返回格式」加了 `不指定` 档并设为默认；尺寸那组加了第三个模式
+    `不指定`（放在「按尺寸/按比例」这一层，不是塞进尺寸值里 —— 跟 `auto` 挨着会混淆），
+    也设为默认。对应 `GenerateImagesOptions` 的 `responseFormat` 变可选。
+  - **`n` 仍然是必填、永远发**（spec 默认 1）。litellm 一次只报一个参数，
+    真撞上 `n is not supported` 就照同样办法处理。
+  - 代价：不发 `response_format` 时 dall-e 系列返 URL，而 `toAsset` 对远程 URL
+    只存链接不落盘（`generation-store.ts:95`），链接过期历史里就空了
+    （spec 说 dall-e 的 URL 只有 60 分钟有效）。用户明确表示留存无所谓。
+    gpt-image 系列不受影响 —— 它们一律返 base64，照样落盘。
+- **查 OpenAI 参数默认值别靠记忆，也别用 WebFetch**（`platform.openai.com` 和
+  `raw.githubusercontent.com` 都够不到）。走本地代理拉官方 spec：
+  `curl -x http://127.0.0.1:7890 -L https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml`
+  （约 3MB，`CreateImageRequest` 在 35442 行附近）。mihomo 跑在 7890；
+  git push 同理，`git -c http.proxy=http://127.0.0.1:7890 push`。
 - **`x-cpa-trace-id` 不是可以随手删的指纹泄漏**。它看着像供应商实现细节，但有两处
   真的依赖它：`errors.ts:87` 的 requestId 回退链，和 `model-catalog.ts:181` 的
   `readFlavor()`（靠 `X-CPA-Version || x-cpa-trace-id` 认出 cpa 方言）。

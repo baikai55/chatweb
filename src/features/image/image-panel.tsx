@@ -47,7 +47,14 @@ import { cn } from "@/shared/lib/cn";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import type { ImageResult } from "@/transport/types";
 
-type DimensionMode = "size" | "aspect_ratio";
+/**
+ * `none` 表示尺寸和比例两个键都不发。
+ *
+ * OpenAI 的 spec 里 `size` 的默认值就是 `auto`，所以不发跟发 `auto` 等价；
+ * 而 `auto` 这个字面量只有允许自动尺寸的模型认，dall-e 和多数第三方 t2i
+ * 会当非法值拒掉（实测 agnes 经 litellm 返回 422 Invalid request）。
+ */
+type DimensionMode = "none" | "size" | "aspect_ratio";
 type Count = "1" | "2" | "3" | "4";
 type Quality = "default" | "auto" | "low" | "medium" | "high" | "standard" | "hd";
 /** `default` 表示整个不发 `response_format`，跟 `Quality` 的 `default` 一个意思。 */
@@ -65,6 +72,7 @@ const COUNTS: Array<SelectOption<Count>> = [
   { value: "4", label: "4 张" },
 ];
 const DIMENSION_MODES: Array<SelectOption<DimensionMode>> = [
+  { value: "none", label: "不指定" },
   { value: "size", label: "按尺寸" },
   { value: "aspect_ratio", label: "按比例" },
 ];
@@ -87,9 +95,9 @@ const QUALITIES: Array<SelectOption<Quality>> = [
   { value: "hd", label: "hd" },
 ];
 const RESPONSE_FORMATS: Array<SelectOption<ResponseFormat>> = [
-  // 默认不发：多发一个 response_format 会被一些上游直接 400，而不发时它们
+  // 默认不指定：多发一个 response_format 会被一些上游直接 400，而不发时它们
   // 各自返回自己的默认格式（通常是 URL），两种响应提取侧都认。
-  { value: "default", label: "不发送" },
+  { value: "default", label: "不指定" },
   { value: "url", label: "URL" },
   { value: "b64_json", label: "Base64" },
 ];
@@ -111,7 +119,7 @@ export function ImagePanel({
   const [selectedModel, setSelectedModel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState<Count>("1");
-  const [dimensionMode, setDimensionMode] = useState<DimensionMode>("size");
+  const [dimensionMode, setDimensionMode] = useState<DimensionMode>("none");
   const [size, setSize] = useState("auto");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("default");
@@ -163,7 +171,7 @@ export function ImagePanel({
     setSelectedModel(imageModels[0]?.id ?? "");
     setPrompt("");
     setCount("1");
-    setDimensionMode("size");
+    setDimensionMode("none");
     setSize("auto");
     setAspectRatio("1:1");
     setQuality("default");
@@ -199,7 +207,15 @@ export function ImagePanel({
   const canUseReferenceImages = selectedRoute ? imageRouteSupportsInputImages(selectedRoute) : false;
   const canSize = routeVars.has("size");
   const canAspect = routeVars.has("aspectRatio");
-  const effectiveDimension: DimensionMode = canSize && canAspect ? dimensionMode : canSize ? "size" : "aspect_ratio";
+  /**
+   * 选的模式如果这条路由的模板根本没引用对应变量，就退回「不指定」——
+   * 而不是替他改选另一个，免得发出去一个他没要求的参数。
+   */
+  const effectiveDimension: DimensionMode = dimensionMode === "size" && canSize
+    ? "size"
+    : dimensionMode === "aspect_ratio" && canAspect
+      ? "aspect_ratio"
+      : "none";
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -356,7 +372,8 @@ export function ImagePanel({
         prompt: text,
         inputImages: referenceImages.map((image) => image.url),
         n: Number(count),
-        ...(effectiveDimension === "size" ? { size } : { aspectRatio }),
+        ...(effectiveDimension === "size" ? { size } : {}),
+        ...(effectiveDimension === "aspect_ratio" ? { aspectRatio } : {}),
         ...(quality === "default" ? {} : { quality }),
         ...(responseFormat === "default" ? {} : { responseFormat }),
         idleTimeoutMs: settings.imageTimeoutSeconds * 1000,
@@ -580,10 +597,12 @@ export function ImagePanel({
                   icon={<Images className="size-3.5" />}
                 />
               ) : null}
-              {canSize && canAspect ? (
+              {canSize || canAspect ? (
                 <CompactSelect
-                  value={dimensionMode}
-                  options={DIMENSION_MODES}
+                  value={effectiveDimension}
+                  options={DIMENSION_MODES.filter((mode) => (
+                    mode.value === "none" || (mode.value === "size" ? canSize : canAspect)
+                  ))}
                   onChange={setDimensionMode}
                   ariaLabel="尺寸参数类型"
                   disabled={pending}
