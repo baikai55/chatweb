@@ -24,7 +24,8 @@ export type ImageRouteContext = {
   size?: string;
   aspectRatio?: string;
   quality?: string;
-  responseFormat: "url" | "b64_json";
+  /** 不填时模板会把 `response_format` 整个键剪掉，见 `GenerateImagesOptions`。 */
+  responseFormat?: "url" | "b64_json";
 };
 
 export const BUILTIN_ROUTE_DEFS: Record<(typeof BUILTIN_IMAGE_ROUTES)[number], CustomImageRoute> = {

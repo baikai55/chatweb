@@ -681,6 +681,29 @@ grok2api 除了 grok2api 原生的 `/tts` `/stt`，还额外提供 OpenAI 标准
   Nano Banana 得走 chat/completions。**没有改分类去隐藏它们** —— 换一台 CPA 部署
   只要把它配成 openai-compatibility 就能用，写死会误伤；而且上游这条报错本身
   已经把可用模型列全了，面板会原样显示给用户，比静默隐藏有用。
+
+  **后来查清了根因**：这条报错取决于 CPA 模型配置里的 `image: true`。加上这个标志
+  该模型就能走图片端点，不加就在 CPA 的路由层被 400 掉 —— 而且是**派发上游之前**
+  就拒了，所以 CPA 的调用日志里查不到任何记录，很容易误判成"是不是客户端拦的"。
+  2026-08 又碰到一次一模一样的（`agnes-image-2.0-flash`），同一个办法解决。
+  那次的报错列表比上面这条多了一个 `grok-imagine-image-2.0`，说明这个可用列表
+  是 CPA 按当前配置实时生成的，**别把它当成常量抄进代码**。
+- **agnes 经 litellm 转发时不吃 `response_format`**：
+  `UnsupportedParamsError: Setting response_format is not supported by openai,
+  agnes-t2i-general-model. To drop it from the call, set litellm.drop_params = True`。
+  `drop_params` 在 agnes 侧，我们改不了。而 `response_format` 又不像 size/quality
+  那样留空就能被模板剪掉（原来类型是必填的 `"url" | "b64_json"`，永远有值），
+  所以给面板的「返回格式」加了 `不发送` 一档并设为**默认**，
+  对应 `GenerateImagesOptions.responseFormat` 变成可选。
+  同理 `n` 也是必填、永远发；litellm 一次只报一个参数，真撞上了照这个办法处理。
+  代价是不发时上游按自己的默认返（一般是 URL），而 `toAsset` 对远程 URL
+  只存链接不落盘（`generation-store.ts:95`），链接过期历史里就空了 —— 已知，可接受。
+- **`x-cpa-trace-id` 不是可以随手删的指纹泄漏**。它看着像供应商实现细节，但有两处
+  真的依赖它：`errors.ts:87` 的 requestId 回退链，和 `model-catalog.ts:181` 的
+  `readFlavor()`（靠 `X-CPA-Version || x-cpa-trace-id` 认出 cpa 方言）。
+  要在 `worker/proxy.ts` 里把它从转发白名单拿掉，得同时想清楚这两处怎么办。
+  另外注意：前端目前**根本不走** `/__api/proxy/*`（见 README「密钥模式现状」），
+  所以浏览器里看到的 `X-CPA-*` 响应头是直连 CPA 拿到的，改 Worker 代理影响不到。
 - **图片生成很慢**：`gpt-image-2` 单张实测 68 秒，加 `quality:"high"` 到 103 秒。
   SSE 的 90 秒静默超时对**非流式** JSON 响应不适用（那是整包等待），但如果以后
   给图片走流式，这个超时要重新评估。

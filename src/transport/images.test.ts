@@ -78,6 +78,60 @@ describe("readImagesDeep", () => {
   });
 });
 
+describe("generateImages response_format", () => {
+  it("不填返回格式时请求体里没有 response_format", async () => {
+    const bodies: unknown[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ data: [{ url: "https://cdn.test/a.png" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    try {
+      await generateImages({
+        backend: createBackend({ name: "t", baseURL: "https://x.test/v1" }),
+        model: "agnes-image-2.0-flash",
+        prompt: "画一只猫",
+        n: 1,
+      });
+
+      expect(bodies).toEqual([{ model: "agnes-image-2.0-flash", prompt: "画一只猫", n: 1 }]);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("不填返回格式时 /images/edits 的 multipart 里也没有 response_format", async () => {
+    const nativeFetch = globalThis.fetch;
+    const forms: FormData[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input).startsWith("data:")) return nativeFetch(input, init);
+      forms.push(init?.body as FormData);
+      return new Response(JSON.stringify({ data: [{ url: "https://cdn.test/edited.png" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    try {
+      await generateImages({
+        backend: createBackend({ name: "t", baseURL: "https://x.test/v1" }),
+        model: "gpt-image-2",
+        prompt: "把背景改成夜晚",
+        inputImages: ["data:image/png;base64,aGVsbG8="],
+        n: 1,
+      });
+
+      expect(forms[0].has("response_format")).toBe(false);
+      expect(forms[0].get("prompt")).toBe("把背景改成夜晚");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+});
+
 describe("generateImages reference images", () => {
   it("标准图片路由带参考图时改走 multipart /images/edits", async () => {
     const nativeFetch = globalThis.fetch;

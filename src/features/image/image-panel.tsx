@@ -50,6 +50,8 @@ import type { ImageResult } from "@/transport/types";
 type DimensionMode = "size" | "aspect_ratio";
 type Count = "1" | "2" | "3" | "4";
 type Quality = "default" | "auto" | "low" | "medium" | "high" | "standard" | "hd";
+/** `default` 表示整个不发 `response_format`，跟 `Quality` 的 `default` 一个意思。 */
+type ResponseFormat = "default" | ImageResponseFormat;
 type ReferenceImage = { id: string; name: string; size: number; url: string };
 
 const MAX_REFERENCE_IMAGES = 4;
@@ -84,7 +86,10 @@ const QUALITIES: Array<SelectOption<Quality>> = [
   { value: "standard", label: "standard" },
   { value: "hd", label: "hd" },
 ];
-const RESPONSE_FORMATS: Array<SelectOption<ImageResponseFormat>> = [
+const RESPONSE_FORMATS: Array<SelectOption<ResponseFormat>> = [
+  // 默认不发：多发一个 response_format 会被一些上游直接 400，而不发时它们
+  // 各自返回自己的默认格式（通常是 URL），两种响应提取侧都认。
+  { value: "default", label: "不发送" },
   { value: "url", label: "URL" },
   { value: "b64_json", label: "Base64" },
 ];
@@ -110,7 +115,7 @@ export function ImagePanel({
   const [size, setSize] = useState("auto");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("default");
-  const [responseFormat, setResponseFormat] = useState<ImageResponseFormat>("url");
+  const [responseFormat, setResponseFormat] = useState<ResponseFormat>("default");
   const [images, setImages] = useState<ImageResult[]>([]);
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   const [readingImages, setReadingImages] = useState(0);
@@ -162,7 +167,7 @@ export function ImagePanel({
     setSize("auto");
     setAspectRatio("1:1");
     setQuality("default");
-    setResponseFormat("url");
+    setResponseFormat("default");
     setImages([]);
     setReferenceImages([]);
     setReadingImages(0);
@@ -353,7 +358,7 @@ export function ImagePanel({
         n: Number(count),
         ...(effectiveDimension === "size" ? { size } : { aspectRatio }),
         ...(quality === "default" ? {} : { quality }),
-        responseFormat,
+        ...(responseFormat === "default" ? {} : { responseFormat }),
         idleTimeoutMs: settings.imageTimeoutSeconds * 1000,
         signal: controller.signal,
         onUpdate: setImages,

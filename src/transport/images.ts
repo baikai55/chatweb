@@ -32,7 +32,15 @@ export type GenerateImagesOptions = {
   size?: string;
   aspectRatio?: string;
   quality?: string;
-  responseFormat: ImageResponseFormat;
+  /**
+   * 不填就整个不发 `response_format`。
+   *
+   * 有的上游多了这个键直接 400 —— 实测经 litellm 转发的 agnes：
+   * `UnsupportedParamsError: Setting response_format is not supported by
+   * openai, agnes-t2i-general-model`。而它又不像 size/quality 那样留空就能被
+   * 模板剪掉（值必填，永远有），所以得允许显式不发。
+   */
+  responseFormat?: ImageResponseFormat;
   /** 上游多久没吐字节算卡死。由设置页的「图片等待上限」给，默认 300 秒。 */
   idleTimeoutMs?: number;
   signal?: AbortSignal;
@@ -157,7 +165,7 @@ async function buildImageEditBody(options: ImageEditBodyOptions & { signal?: Abo
   if (options.size) body.set("size", options.size);
   else if (options.aspectRatio) body.set("aspect_ratio", options.aspectRatio);
   if (options.quality) body.set("quality", options.quality);
-  body.set("response_format", options.responseFormat);
+  if (options.responseFormat) body.set("response_format", options.responseFormat);
 
   const images = await Promise.all(options.inputImages.map((url, index) => (
     loadReferenceImage(url, index, options.signal, options.requestTimeoutMs)
