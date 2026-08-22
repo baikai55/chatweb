@@ -1,5 +1,14 @@
 import { firstString, isRecord, parseJSON, readError, toTransportError, TransportError } from "@/transport/errors";
-import { joinURL } from "@/transport/chat-completions";
+import { joinURL } from "@/transport/url";
+import { collectText } from "@/transport/media-text";
+import { selectByPath } from "@/transport/route-template";
+import { readBufferedFrames } from "@/transport/sse";
+import {
+  BUILTIN_VIDEO_ROUTE_DEFS,
+  resolveVideoRoute,
+  resolveVideoStatusURL,
+} from "@/transport/video-routes";
+import type { CustomVideoRoute } from "@/backends/types";
 import { fetchWorkerApi, WorkerAuthorizationError } from "@/transport/worker-access";
 import {
   createRequestTimeoutScope,
@@ -55,6 +64,11 @@ export type VideoGenerationInput = VideoJobInput & {
   aspectRatio?: string;
   resolution?: string;
   source?: VideoSource;
+  /**
+   * 这个模型走哪条视频路由。不传时用内置的 `/videos/generations`，
+   * 也就是加路由之前的行为。面板用 `videoRouteFor(backend, model)` 取。
+   */
+  route?: CustomVideoRoute;
 };
 
 export type VideoEditInput = VideoJobInput & {
@@ -114,23 +128,64 @@ export async function uploadVideoInput(
   }
 }
 
-/** 提交一个视频生成任务。不同后端常用的 request_id / id / task_id 都会被识别。 */
+/**
+ * 提交一个视频生成任务。
+ *
+ * 打哪个端点、请求体长什么样，由传入的视频路由决定（见 `src/transport/video-routes.ts`）——
+ * 有的提供商用 `/videos/generations` 这种「提交任务再轮询」的形式，有的把视频生成
+ * 直接挂在 `/chat/completions` 上同步返回，这个差异从模型 id 推断不出来。
+ *
+ * 不同后端常用的 request_id / id / task_id 都会被识别。
+ */
 export async function createVideoGeneration(input: VideoGenerationInput): Promise<VideoGenerationJob> {
-  const body = videoJobBody(input);
-  if (typeof input.duration === "number" && Number.isFinite(input.duration)) body.duration = input.duration;
-  if (input.aspectRatio?.trim()) body.aspect_ratio = input.aspectRatio.trim();
-  if (input.resolution?.trim()) body.resolution = input.resolution.trim();
+  const model = input.model.trim();
+  const prompt = input.prompt.trim();
+  if (!model) throw new TransportError(0, "视频模型不能为空", "invalid_request");
+  if (!prompt) throw new TransportError(0, "视频描述不能为空", "invalid_request");
 
-  if (input.source) {
-    if (input.source.kind !== "image") {
-      throw new TransportError(0, "视频生成只接受源图片；编辑或延长请使用对应接口", "invalid_request");
-    }
-    const url = input.source.url.trim();
-    if (!url) throw new TransportError(0, "源图片 URL 不能为空", "invalid_request");
-    body.image = { url };
+  if (input.source && input.source.kind !== "image") {
+    throw new TransportError(0, "视频生成只接受源图片；编辑或延长请使用对应接口", "invalid_request");
+  }
+  const sourceUrl = input.source?.url.trim() ?? "";
+  if (input.source && !sourceUrl) {
+    throw new TransportError(0, "源图片 URL 不能为空", "invalid_request");
   }
 
-  return submitVideoJob(input, "/videos/generations", body);
+  const definition = input.route ?? BUILTIN_VIDEO_ROUTE_DEFS.videos;
+  const route = resolveVideoRoute(input.baseURL, definition, {
+    model,
+    prompt,
+    duration: input.duration,
+    aspectRatio: input.aspectRatio,
+    resolution: input.resolution,
+    sourceUrl: sourceUrl || undefined,
+  });
+
+  const payloads = await requestVideoPayloads(route.url, {
+    method: route.method,
+    headers: authHeaders(input.apiKey),
+    body: route.body,
+    signal: input.signal,
+  }, input.requestTimeoutMs);
+
+  const job = readVideoJob(payloads, input.baseURL, route.videoUrlPaths);
+
+  // 上游自己说失败了就原样交给面板显示，别再拿"没有任务 ID"盖掉真正的原因
+  if (job.status.status === "failed") return job;
+  // 有些同步兼容端点直接返回 video.url；这种情况不需要再造一个虚假的轮询 ID。
+  if (job.status.video) return job;
+
+  if (!route.statusPath.trim()) {
+    throw new TransportError(
+      200,
+      `路由「${route.name}」没有配置状态查询路径，按同步处理，但响应里没有视频地址`,
+      "invalid_response",
+    );
+  }
+  if (!job.requestId) {
+    throw new TransportError(200, "视频响应里没有 request_id、id 或 task_id", "invalid_response");
+  }
+  return job;
 }
 
 /** 使用一个公网源视频提交编辑任务。 */
@@ -153,25 +208,43 @@ export async function extendVideoGeneration(input: VideoExtendInput): Promise<Vi
   return submitVideoJob(input, "/videos/extensions", body);
 }
 
+/**
+ * 编辑和延长走固定端点，不经过路由 —— 它们的语义由 `/videos/edits`、
+ * `/videos/extensions` 这套任务接口定死，对话端点没有对应概念。
+ */
 async function submitVideoJob(
   input: VideoJobInput,
-  path: "/videos/generations" | "/videos/edits" | "/videos/extensions",
+  path: "/videos/edits" | "/videos/extensions",
   body: Record<string, unknown>,
 ): Promise<VideoGenerationJob> {
-  const payload = await requestJSON(joinURL(input.baseURL, path), {
+  const payloads = await requestVideoPayloads(joinURL(input.baseURL, path), {
     method: "POST",
     headers: authHeaders(input.apiKey),
     body: JSON.stringify(body),
     signal: input.signal,
   }, input.requestTimeoutMs);
 
-  const requestId = readVideoRequestId(payload);
-  const status = readVideoGenerationStatus(payload, requestId, input.baseURL);
-  // 有些同步兼容端点直接返回 video.url；这种情况不需要再造一个虚假的轮询 ID。
-  if (!requestId && !status.video) {
+  const job = readVideoJob(payloads, input.baseURL, []);
+  if (job.status.status === "failed" || job.status.video) return job;
+  if (!job.requestId) {
     throw new TransportError(200, "视频响应里没有 request_id、id 或 task_id", "invalid_response");
   }
-  return { requestId, status };
+  return job;
+}
+
+/**
+ * 从一次提交响应的若干 payload 里读出任务。
+ *
+ * 分帧响应下哪一帧最有价值是有顺序的：带视频的那帧 > 失败帧（带原因）> 最后一帧。
+ * request_id 则可能出现在任意一帧上，单独找一遍。
+ */
+function readVideoJob(payloads: unknown[], baseURL: string, videoUrlPaths: string[]): VideoGenerationJob {
+  const statuses = payloads.map((payload) => readVideoGenerationStatus(payload, "", baseURL, videoUrlPaths));
+  const status = statuses.find((item) => item.video)
+    ?? statuses.find((item) => item.status === "failed")
+    ?? statuses[statuses.length - 1];
+  const requestId = statuses.map((item) => item.requestId).find(Boolean) ?? "";
+  return { requestId, status: { ...status, requestId } };
 }
 
 function videoJobBody(input: VideoJobInput): Record<string, unknown> {
@@ -196,24 +269,40 @@ export async function getVideoGeneration(input: {
   baseURL: string;
   apiKey: string;
   requestId: string;
+  /** 路由给的状态查询路径，`${requestId}` 会被替换。默认 `/videos/${requestId}`。 */
+  statusPath?: string;
+  /** 路由给的取视频路径；留空走通用提取。 */
+  videoUrlPaths?: string[];
   /** 单次状态请求建连和读取正文的单阶段上限。默认 60 秒。 */
   requestTimeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<VideoGenerationStatus> {
   const requestId = input.requestId.trim();
   if (!requestId) throw new Error("视频任务 ID 不能为空");
-  const payload = await requestJSON(joinURL(input.baseURL, `/videos/${encodeURIComponent(requestId)}`), {
+  const url = resolveVideoStatusURL(
+    input.baseURL,
+    input.statusPath?.trim() || BUILTIN_VIDEO_ROUTE_DEFS.videos.statusPath,
+    requestId,
+  );
+  const payloads = await requestVideoPayloads(url, {
     method: "GET",
     headers: authHeaders(input.apiKey),
     signal: input.signal,
   }, input.requestTimeoutMs);
-  return readVideoGenerationStatus(payload, requestId, input.baseURL);
+  const paths = input.videoUrlPaths ?? [];
+  const statuses = payloads.map((payload) => readVideoGenerationStatus(payload, requestId, input.baseURL, paths));
+  return statuses.find((item) => item.video)
+    ?? statuses.find((item) => item.status === "failed")
+    ?? statuses[statuses.length - 1];
 }
 
 export type PollVideoGenerationInput = {
   baseURL: string;
   apiKey: string;
   requestId: string;
+  /** 路由给的状态查询路径和取视频路径，透传给每次状态请求。 */
+  statusPath?: string;
+  videoUrlPaths?: string[];
   /** 创建响应已经带状态时可传入，避免丢掉首帧的进度和错误。 */
   initial?: VideoGenerationStatus;
   intervalMs?: number;
@@ -246,6 +335,8 @@ export async function pollVideoGeneration(input: PollVideoGenerationInput): Prom
           baseURL: input.baseURL,
           apiKey: input.apiKey,
           requestId: input.requestId,
+          statusPath: input.statusPath,
+          videoUrlPaths: input.videoUrlPaths,
           requestTimeoutMs: input.requestTimeoutMs,
           signal: polling.signal,
         });
@@ -259,15 +350,22 @@ export async function pollVideoGeneration(input: PollVideoGenerationInput): Prom
   }
 }
 
-/** 公开给面板/测试的状态解码器，兼容常见 envelope 和字段命名。 */
+/**
+ * 公开给面板/测试的状态解码器，兼容常见 envelope 和字段命名。
+ *
+ * `videoUrlPaths` 由路由提供；留空（多数情况）时走通用提取：先深挖结构化字段，
+ * 再扫回复正文 —— 走 chat/completions 生成视频时地址往往只出现在正文的
+ * markdown 链接里，字段扫描完全看不到。
+ */
 export function readVideoGenerationStatus(
   payload: unknown,
   requestId = "",
   baseURL?: string,
+  videoUrlPaths: string[] = [],
 ): VideoGenerationStatus {
   const candidates = collectCandidates(payload);
   const rawStatus = firstStringFromCandidates(candidates, ["status", "state", "phase"]).toLowerCase();
-  const videoURL = readURL(payload);
+  const videoURL = readVideoURL(payload, videoUrlPaths);
   const error = readVideoError(candidates);
   const status = normalizeStatus(rawStatus, Boolean(videoURL), Boolean(error));
   const id = requestId || readVideoRequestId(payload);
@@ -285,6 +383,60 @@ export function readVideoGenerationStatus(
   };
 }
 
+/**
+ * 取视频地址。三层，命中就停：
+ *   1. 路由配的点号路径 —— 写错一个字就全都取不到，所以后面两层照样兜底
+ *   2. 结构化字段深挖（video_url / output_url / video.url …）
+ *   3. 回复正文里的链接
+ */
+function readVideoURL(payload: unknown, videoUrlPaths: string[]): string {
+  for (const path of videoUrlPaths) {
+    for (const value of selectByPath(payload, path)) {
+      if (typeof value === "string" && value.trim()) return value.trim();
+      const nested = readURLValue(value);
+      if (nested) return nested;
+    }
+  }
+  const structured = readURL(payload);
+  if (structured) return structured;
+
+  for (const text of collectText(payload)) {
+    const found = readVideoURLFromText(text);
+    if (found) return found;
+  }
+  return "";
+}
+
+const MARKDOWN_LINK = /(!?)\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)/g;
+const BARE_URL = /https?:\/\/[^\s<>"')\]]+/gi;
+const VIDEO_EXTENSION = /\.(?:mp4|webm|mov|m4v|mkv|avi)(?:[?#]|$)/i;
+
+/**
+ * 从一段正文里找视频地址。
+ *
+ * 带视频扩展名的链接最可信，优先。都没有时退回第一条普通 markdown 链接 ——
+ * 签名 URL 常常不带扩展名。`![](…)` 图片语法多半是封面图，不作为候选。
+ * 认不出来的形状交给路由的 `videoUrlPaths` 显式指定。
+ */
+export function readVideoURLFromText(text: string): string {
+  const links: string[] = [];
+
+  for (const match of text.matchAll(MARKDOWN_LINK)) {
+    const url = match[2]?.trim();
+    if (!url) continue;
+    if (VIDEO_EXTENSION.test(url)) return url;
+    if (!match[1] && /^https?:/i.test(url)) links.push(url);
+  }
+
+  for (const match of text.matchAll(BARE_URL)) {
+    // 句尾标点不属于 URL
+    const url = match[0].replace(/[),.;，。]+$/, "");
+    if (VIDEO_EXTENSION.test(url)) return url;
+  }
+
+  return links[0] ?? "";
+}
+
 export function readVideoRequestId(payload: unknown): string {
   return firstStringFromCandidates(collectCandidates(payload), [
     "request_id", "requestId", "task_id", "taskId", "job_id", "jobId", "generation_id", "generationId", "video_id", "videoId", "id",
@@ -297,7 +449,18 @@ function authHeaders(apiKey: string): Headers {
   return headers;
 }
 
-async function requestJSON(url: string, init: RequestInit, configuredTimeoutMs?: number): Promise<unknown> {
+/**
+ * 读一次视频接口的响应，返回其中所有可解析的 payload（至少一个）。
+ *
+ * 为什么不是单个 JSON：走对话端点的视频提供商即使被要求 `stream: false`，
+ * 也有把正文写成 SSE / NDJSON 的；还有极少数兼容层直接返回一条纯文本链接。
+ * 这几种都在这里收敛掉，上层只面对 payload 数组。
+ */
+async function requestVideoPayloads(
+  url: string,
+  init: RequestInit,
+  configuredTimeoutMs?: number,
+): Promise<unknown[]> {
   const timeoutMs = configuredTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const request = createRequestTimeoutScope(init.signal ?? undefined);
   try {
@@ -305,9 +468,20 @@ async function requestJSON(url: string, init: RequestInit, configuredTimeoutMs?:
     const text = await request.run(() => response.text(), timeoutMs, "读取视频接口响应");
     if (!response.ok) throw toTransportError(response, text);
     if (!text.trim()) throw new TransportError(response.status, "上游返回了空响应", "invalid_response");
+
     const payload = parseJSON(text);
-    if (payload === null) throw new TransportError(response.status, "上游返回了无法解析的 JSON", "invalid_response");
-    return payload;
+    if (payload !== null) return [payload];
+
+    const framed = readBufferedFrames(text)
+      .filter((frame) => frame.data.trim() !== "[DONE]")
+      .map((frame) => parseJSON(frame.data))
+      .filter((value) => value !== null);
+    if (framed.length > 0) return framed;
+
+    const bare = readVideoURLFromText(text);
+    if (bare) return [{ video_url: bare }];
+
+    throw new TransportError(response.status, "上游返回了无法解析的 JSON", "invalid_response");
   } finally {
     request.dispose();
   }

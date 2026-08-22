@@ -1,5 +1,6 @@
 import { TransportError, isAbortError, isRecord, parseJSON, toTransportError, firstString } from "@/transport/errors";
 import { isErrorFrame, readSSE } from "@/transport/sse";
+import { joinURL } from "@/transport/url";
 import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import {
   readChatContentText,
@@ -618,10 +619,4 @@ function readNonStreamResponse(response: Response, responseText: string): ChatSt
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
     nativeFinishReason: firstString(choice?.native_finish_reason, choice?.finish_reason) || undefined,
   };
-}
-
-export function joinURL(baseURL: string, path: string): string {
-  const base = baseURL.replace(/\/+$/, "");
-  const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `${base}${suffix}`;
 }

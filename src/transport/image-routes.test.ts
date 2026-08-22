@@ -6,9 +6,7 @@ import {
   imageRouteFor,
   imageRouteSupportsInputImages,
   resolveImageRoute,
-  resolveTemplate,
   routeVariables,
-  selectByPath,
 } from "@/transport/image-routes";
 
 function backend(overrides: Partial<Backend> = {}): Backend {
@@ -23,36 +21,6 @@ const CONTEXT = {
   quality: "high",
   responseFormat: "url" as const,
 };
-
-describe("resolveTemplate", () => {
-  const values = { prompt: "猫", n: 2, size: undefined, nested: { a: "深" } };
-
-  it("整串引用保留原类型", () => {
-    expect(resolveTemplate("$n", values)).toBe(2);
-  });
-
-  it("取不到值时返回 undefined，好让调用方剪掉这个键", () => {
-    expect(resolveTemplate("$size", values)).toBeUndefined();
-    expect(resolveTemplate({ a: "$size", b: "$prompt" }, values)).toEqual({ b: "猫" });
-  });
-
-  it("串内插值按字符串拼，缺的补空", () => {
-    expect(resolveTemplate("画一只${prompt}，尺寸${size}", values)).toBe("画一只猫，尺寸");
-  });
-
-  it("支持点号路径", () => {
-    expect(resolveTemplate("$nested.a", values)).toBe("深");
-  });
-
-  it("不是引用的字符串原样保留", () => {
-    expect(resolveTemplate("user", values)).toBe("user");
-    expect(resolveTemplate("$100", values)).toBe("$100");
-  });
-
-  it("数组里被剪掉的项不留空洞", () => {
-    expect(resolveTemplate(["$prompt", "$size", "$n"], values)).toEqual(["猫", 2]);
-  });
-});
 
 describe("resolveImageRoute", () => {
   it("内置图片路由发标准 OpenAI 请求体", () => {
@@ -202,29 +170,5 @@ describe("routeVariables", () => {
       id: "custom-vision",
       body: { images: "$inputImages" },
     })).toBe(true);
-  });
-});
-
-describe("selectByPath", () => {
-  const payload = {
-    choices: [
-      { message: { images: [{ image_url: { url: "a.png" } }, { image_url: { url: "b.png" } }] } },
-      { message: { images: [{ image_url: { url: "c.png" } }] } },
-    ],
-    data: [{ b64_json: "AAA" }],
-  };
-
-  it("`*` 展开数组", () => {
-    expect(selectByPath(payload, "choices.*.message.images.*.image_url.url"))
-      .toEqual(["a.png", "b.png", "c.png"]);
-  });
-
-  it("数字下标取单项", () => {
-    expect(selectByPath(payload, "choices.1.message.images.0.image_url.url")).toEqual(["c.png"]);
-  });
-
-  it("路径不存在时返回空数组而不是抛错", () => {
-    expect(selectByPath(payload, "choices.*.nope.url")).toEqual([]);
-    expect(selectByPath(payload, "data.9.b64_json")).toEqual([]);
   });
 });

@@ -91,13 +91,13 @@ describe("resolveTTSRoute", () => {
 
     expect(resolved.url).toBe(`${BASE_URL}/speech/en/synthesize?model=tts%2Fmodel&speed=1.25`);
     expect(resolved.contentType).toBe("audio/mpeg");
+    // nested 里唯一的键取不到值，整个对象也跟着被剪掉 —— 发一个空壳上去有的后端会判成非法值
     expect(JSON.parse(resolved.body ?? "null")).toEqual({
       model: "tts/model",
       input: "hello",
       voice: "voice-a",
       speed: 1.25,
       language: "en",
-      nested: {},
     });
   });
 

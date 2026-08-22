@@ -1,4 +1,4 @@
-import { joinURL } from "@/transport/chat-completions";
+import { joinURL } from "@/transport/url";
 import { isAbortError, isRecord, toTransportError, firstString } from "@/transport/errors";
 import { createRequestTimeoutScope, DEFAULT_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 import { STORE_MODEL_CACHE, idbGet, idbPut } from "@/shared/db/idb";

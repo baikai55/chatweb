@@ -1,4 +1,4 @@
-import { joinURL } from "@/transport/chat-completions";
+import { joinURL } from "@/transport/url";
 import { TransportError, firstString, isRecord, parseJSON, toTransportError } from "@/transport/errors";
 import { synthesizeWithTTSRoute } from "@/transport/tts-routes";
 import type { CustomTTSRoute } from "@/backends/types";

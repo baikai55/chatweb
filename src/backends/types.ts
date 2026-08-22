@@ -107,6 +107,42 @@ export const customImageRouteSchema = z.object({
 export type CustomImageRoute = z.infer<typeof customImageRouteSchema>;
 
 /**
+ * 视频模型走哪条请求路线。
+ *
+ * 跟图片是同一个问题：有的提供商用 OpenAI 的 `/videos/generations`（提交任务 + 轮询），
+ * 有的把视频生成直接挂在 `/chat/completions` 上（同步返回，视频地址在回复正文里）。
+ * 这个差异从模型 id 一样推断不出来，所以同样做成可配的路由。
+ */
+export const BUILTIN_VIDEO_ROUTES = ["videos", "chat"] as const;
+export type BuiltinVideoRoute = (typeof BUILTIN_VIDEO_ROUTES)[number];
+
+/**
+ * 自定义视频路由。请求侧的模板语法与图片路由完全一致（见 `route-template.ts`），
+ * 差别只在响应侧：
+ *   - videoUrlPaths 是点号路径，`*` 展开数组。留空时回落到通用深度提取，
+ *     并且会扫回复正文里的 markdown 链接和裸视频链接。
+ *   - statusPath 决定这条路由是异步还是同步：填了就用它轮询任务状态
+ *     （`${requestId}` 会被替换成提交响应里拿到的任务 ID），留空表示同步 ——
+ *     提交响应里没有视频地址就直接报错，不去轮询一个不存在的端点。
+ *
+ * 编辑 / 延长两个操作只有内置 `videos` 路由支持：它们依赖 `/videos/edits`
+ * 和 `/videos/extensions` 的固定语义，对话端点没有对应概念。
+ */
+export const customVideoRouteSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /** 相对 baseURL 的路径，例如 chat/completions；也可以写完整 URL。 */
+  path: z.string().min(1),
+  method: z.enum(["POST", "GET"]).default("POST"),
+  query: z.record(z.string(), z.string()).default({}),
+  body: z.record(z.string(), z.unknown()).default({}),
+  videoUrlPaths: z.array(z.string()).default([]),
+  statusPath: z.string().default(""),
+});
+
+export type CustomVideoRoute = z.infer<typeof customVideoRouteSchema>;
+
+/**
  * 自定义 TTS 路由。
  *
  * body / query 使用与图片自定义路由相同的 `$变量` 模板；响应既可以返回音频 URL，
@@ -199,6 +235,12 @@ export const backendSchema = z.object({
   imageRouteOverrides: z.record(z.string(), z.string()).default({}),
   /** 没有单独指定路由的图片模型默认走哪条 */
   defaultImageRoute: z.string().default("images"),
+  /** 用户定义的视频路由 */
+  customVideoRoutes: z.array(customVideoRouteSchema).default([]),
+  /** 模型 id → 路由 id（内置 videos / chat，或某条自定义路由的 id） */
+  videoRouteOverrides: z.record(z.string(), z.string()).default({}),
+  /** 没有单独指定路由的视频模型默认走哪条 */
+  defaultVideoRoute: z.string().default("videos"),
   /** 用户定义的 TTS 请求/响应路由；由 voiceRouting.tts.routeId 引用。 */
   customTTSRoutes: z.array(customTTSRouteSchema).default([]),
 });
@@ -255,6 +297,9 @@ export function createBackend(input: Partial<Backend> & { name: string; baseURL:
     customImageRoutes: input.customImageRoutes ?? [],
     imageRouteOverrides: input.imageRouteOverrides ?? {},
     defaultImageRoute: input.defaultImageRoute ?? "images",
+    customVideoRoutes: input.customVideoRoutes ?? [],
+    videoRouteOverrides: input.videoRouteOverrides ?? {},
+    defaultVideoRoute: input.defaultVideoRoute ?? "videos",
     customTTSRoutes: input.customTTSRoutes ?? [],
   });
 }

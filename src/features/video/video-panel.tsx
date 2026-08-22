@@ -24,6 +24,12 @@ import { cn } from "@/shared/lib/cn";
 import { notifyTaskDone, shouldSubmitOnKey, useAppSettings } from "@/shared/settings/app-settings";
 import { isAbortError } from "@/transport/errors";
 import {
+  videoRouteFor,
+  videoRouteSupportsEditing,
+  videoRouteSupportsSource,
+  videoRouteVariables,
+} from "@/transport/video-routes";
+import {
   createVideoGeneration,
   editVideoGeneration,
   extendVideoGeneration,
@@ -86,6 +92,22 @@ export function VideoPanel({
   const [formError, setFormError] = useState("");
   const [run, setRun] = useState<RunState>({ phase: "idle" });
 
+  /**
+   * 当前模型走哪条视频路由，以及这条路由到底会发出哪些参数。
+   *
+   * 跟生图面板同一个理由：走 chat/completions 的提供商根本不接收时长、画面比例、
+   * 清晰度，还把控件摆在那里就是骗人。编辑和延长更是只有内置 `/videos` 那套
+   * 任务接口才有，对话端点没有对应端点。
+   */
+  const route = useMemo(() => videoRouteFor(backend, model), [backend, model]);
+  const routeVars = useMemo(() => videoRouteVariables(route), [route]);
+  const canEdit = videoRouteSupportsEditing(route);
+  const canUseSource = videoRouteSupportsSource(route);
+  const operations = useMemo(
+    () => (canEdit ? VIDEO_OPERATIONS : VIDEO_OPERATIONS.filter((item) => item.value === "generate")),
+    [canEdit],
+  );
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runSequenceRef = useRef(0);
@@ -133,6 +155,23 @@ export function VideoPanel({
   useEffect(() => () => {
     if (sourcePreview) URL.revokeObjectURL(sourcePreview);
   }, [sourcePreview]);
+
+  // 换到一条不支持编辑/延长或不收源文件的路由时，把表单收回到合法状态，
+  // 免得留着一个提交上去必然报错的选择。
+  useEffect(() => {
+    if (canEdit || busy) return;
+    setOperation("generate");
+    // 生成只接受源图片，之前为编辑/延长选的源视频得一起清掉
+    if (sourceFile && sourceKind(sourceFile) !== "image") {
+      setSourceFile(null);
+      setSourcePreview("");
+    }
+  }, [canEdit, busy, sourceFile]);
+  useEffect(() => {
+    if (canUseSource || busy) return;
+    setSourceFile(null);
+    setSourcePreview("");
+  }, [canUseSource, busy]);
 
   function changeOperation(next: VideoOperation) {
     if (busy || next === operation) return;
@@ -252,6 +291,7 @@ export function VideoPanel({
       const job = operation === "generate"
         ? await createVideoGeneration({
             ...commonInput,
+            route,
             duration: Number(duration),
             aspectRatio,
             resolution,
@@ -277,6 +317,9 @@ export function VideoPanel({
         baseURL: backend.baseURL,
         apiKey: backend.apiKey,
         requestId: job.requestId,
+        // 编辑和延长不经过路由，用内置任务端点的默认状态路径
+        statusPath: operation === "generate" ? route.statusPath : undefined,
+        videoUrlPaths: operation === "generate" ? route.videoUrlPaths : undefined,
         initial: job.status,
         onUpdate: (status) => update(runStateFromStatus(status, job.requestId)),
         signal: controller.signal,
@@ -316,7 +359,9 @@ export function VideoPanel({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1.5">
-        <OperationSegment value={operation} onChange={changeOperation} disabled={busy} />
+        {operations.length > 1 ? (
+          <OperationSegment value={operation} operations={operations} onChange={changeOperation} disabled={busy} />
+        ) : null}
         <ModelPicker
           models={videoModels}
           value={model}
@@ -326,9 +371,15 @@ export function VideoPanel({
         />
         {operation === "generate" ? (
           <>
-            <CompactSelect label="时长" value={duration} options={VIDEO_DURATIONS} onChange={setDuration} disabled={busy} />
-            <CompactSelect label="画面比例" value={aspectRatio} options={VIDEO_ASPECT_RATIOS} onChange={setAspectRatio} disabled={busy} />
-            <CompactSelect label="清晰度" value={resolution} options={VIDEO_RESOLUTIONS} onChange={setResolution} disabled={busy} />
+            {routeVars.has("duration") ? (
+              <CompactSelect label="时长" value={duration} options={VIDEO_DURATIONS} onChange={setDuration} disabled={busy} />
+            ) : null}
+            {routeVars.has("aspectRatio") ? (
+              <CompactSelect label="画面比例" value={aspectRatio} options={VIDEO_ASPECT_RATIOS} onChange={setAspectRatio} disabled={busy} />
+            ) : null}
+            {routeVars.has("resolution") ? (
+              <CompactSelect label="清晰度" value={resolution} options={VIDEO_RESOLUTIONS} onChange={setResolution} disabled={busy} />
+            ) : null}
           </>
         ) : null}
         {operation === "extend" ? (
@@ -389,24 +440,28 @@ export function VideoPanel({
 
           <div className="flex items-center justify-between gap-2 px-3 pb-3">
             <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*,video/*"
-                className="hidden"
-                onChange={selectSource}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className={cn("h-8 gap-1.5 px-2 font-normal", sourceFile && "bg-accent")}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={busy}
-              >
-                <Paperclip className="size-3.5" />
-                {sourceFile ? (operation === "generate" ? "更换源图" : "更换源视频") : sourceButtonLabel(operation)}
-              </Button>
+              {canUseSource ? (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*,video/*"
+                    className="hidden"
+                    onChange={selectSource}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className={cn("h-8 gap-1.5 px-2 font-normal", sourceFile && "bg-accent")}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={busy}
+                  >
+                    <Paperclip className="size-3.5" />
+                    {sourceFile ? (operation === "generate" ? "更换源图" : "更换源视频") : sourceButtonLabel(operation)}
+                  </Button>
+                </>
+              ) : null}
             </div>
 
             {busy ? (
@@ -440,16 +495,18 @@ export function VideoPanel({
 
 function OperationSegment({
   value,
+  operations,
   onChange,
   disabled,
 }: {
   value: VideoOperation;
+  operations: Array<{ value: VideoOperation; label: string }>;
   onChange: (value: VideoOperation) => void;
   disabled: boolean;
 }) {
   return (
     <div className="inline-flex shrink-0 rounded-md bg-secondary p-0.5" role="group" aria-label="视频操作">
-      {VIDEO_OPERATIONS.map((operation) => (
+      {operations.map((operation) => (
         <button
           key={operation.value}
           type="button"

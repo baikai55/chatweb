@@ -163,3 +163,43 @@ export function isErrorFrame(frame: SSEFrame, payload: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * 整包读完之后再按帧解析。
+ *
+ * `Content-Type` 说是 JSON 或 text/plain、正文却是 SSE 或 NDJSON 的后端不少见，
+ * 这时候流式读取那条路没被触发，只能拿到完整文本再补一次兼容。
+ *
+ * 返回空数组表示这段文本不是分帧格式，调用方按整包 JSON / 纯文本处理。
+ */
+export function readBufferedFrames(responseText: string): SSEFrame[] {
+  const normalized = responseText.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const frames: SSEFrame[] = [];
+
+  for (const block of normalized.split(/\n\n+/)) {
+    let event: string | undefined;
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (data.length > 0) frames.push({ event, data: data.join("\n") });
+  }
+  if (frames.length > 0) return frames;
+
+  // 没有 data: 前缀时再尝试一行一个 JSON 的 NDJSON。
+  const lines = normalized.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1 && lines.every((line) => line === "[DONE]" || isParseableJSON(line))) {
+    return lines.map((data) => ({ data }));
+  }
+  return [];
+}
+
+function isParseableJSON(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}

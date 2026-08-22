@@ -5,8 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CatalogModel } from "@/backends/model-catalog";
-import { createBackend } from "@/backends/types";
+import { createBackend, type Backend } from "@/backends/types";
 import type { GenerationRecord } from "@/features/history/generation-store";
+import { BUILTIN_VIDEO_ROUTE_DEFS } from "@/transport/video-routes";
 import { VideoPanel } from "@/features/video/video-panel";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -142,3 +143,76 @@ describe("VideoPanel 任务保护", () => {
     expect(historyMocks.remove).not.toHaveBeenCalled();
   });
 });
+
+describe("VideoPanel 跟随视频路由", () => {
+  async function render(target: Backend) {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(<VideoPanel backend={target} models={[model]} onManage={vi.fn()} />);
+    });
+    return container;
+  }
+
+  async function submit(container: HTMLElement) {
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    await act(async () => {
+      if (textarea) {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "海边日落");
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="生成视频"]')?.click();
+    });
+  }
+
+  it("默认走内置视频端点时，编辑/延长和附件都在", async () => {
+    videoMocks.createVideoGeneration.mockImplementation(() => new Promise(() => {}));
+    const container = await render(backend);
+    expect(container.querySelector('[aria-label="视频操作"]')).not.toBeNull();
+    expect(findByText(container, "添加源图（可选）")).not.toBeNull();
+  });
+
+  it("走对话端点时收起编辑和延长 —— 那两个操作只有任务端点有", async () => {
+    videoMocks.createVideoGeneration.mockImplementation(() => new Promise(() => {}));
+    const container = await render({ ...backend, defaultVideoRoute: "chat" });
+    expect(container.querySelector('[aria-label="视频操作"]')).toBeNull();
+    // 对话端点用多模态消息带源图，附件仍然可用
+    expect(findByText(container, "添加源图（可选）")).not.toBeNull();
+  });
+
+  it("模板里没引用源地址的路由不显示附件按钮", async () => {
+    videoMocks.createVideoGeneration.mockImplementation(() => new Promise(() => {}));
+    const container = await render({
+      ...backend,
+      customVideoRoutes: [{
+        ...BUILTIN_VIDEO_ROUTE_DEFS.chat,
+        id: "text-only",
+        name: "纯文本",
+        body: { model: "$model", prompt: "$prompt" },
+      }],
+      defaultVideoRoute: "text-only",
+    });
+    expect(findByText(container, "添加源图（可选）")).toBeNull();
+  });
+
+  it("把模型选中的那条路由传给传输层", async () => {
+    videoMocks.createVideoGeneration.mockImplementation(() => new Promise(() => {}));
+    const container = await render({
+      ...backend,
+      videoRouteOverrides: { "video-model": "chat" },
+    });
+    await submit(container);
+    expect(videoMocks.createVideoGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ route: expect.objectContaining({ id: "chat" }) }),
+    );
+  });
+});
+
+function findByText(container: HTMLElement, text: string): HTMLElement | null {
+  return [...container.querySelectorAll<HTMLElement>("button")]
+    .find((node) => node.textContent?.includes(text)) ?? null;
+}

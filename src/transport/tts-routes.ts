@@ -1,7 +1,7 @@
 import type { CustomTTSRoute } from "@/backends/types";
-import { joinURL } from "@/transport/chat-completions";
+import { joinURL } from "@/transport/url";
 import { TransportError, isRecord, parseJSON, toTransportError } from "@/transport/errors";
-import { resolveTemplate, selectByPath } from "@/transport/image-routes";
+import { resolveTemplate, selectByPath } from "@/transport/route-template";
 import type { SpeechAudioResult } from "@/transport/voice";
 import { createRequestTimeoutScope, DEFAULT_MEDIA_REQUEST_TIMEOUT_MS } from "@/transport/request-timeout";
 

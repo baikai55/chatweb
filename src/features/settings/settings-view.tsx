@@ -10,11 +10,13 @@ import {
   WEB_SEARCH_MODES,
   customImageRouteSchema,
   customTTSRequestSchema,
+  customVideoRouteSchema,
   normalizeBaseURL,
   type Backend,
   type Capability,
   type CustomImageRoute,
   type CustomTTSRoute,
+  type CustomVideoRoute,
   type ModelKind,
   type VoiceBinding,
   type VoiceProtocol,
@@ -56,6 +58,12 @@ import {
   isBuiltinRouteId,
   listImageRoutes,
 } from "@/transport/image-routes";
+import {
+  BUILTIN_VIDEO_ROUTE_DEFS,
+  draftCustomVideoRoute,
+  isBuiltinVideoRouteId,
+  listVideoRoutes,
+} from "@/transport/video-routes";
 import {
   MIMO_CHAT_TTS_ROUTE,
   isRelativeTTSRoutePath,
@@ -116,7 +124,7 @@ const BUILTIN_TTS_ROUTE = "__chatweb_builtin_tts_route__";
 /**
  * 模型页上的改动先攒在这里，点保存才落盘。
  *
- * 三样都进草稿：勾选、归类、图片路由 —— 一个面板里有的控件即时生效、
+ * 四样都进草稿：勾选、归类、图片路由、视频路由 —— 一个面板里有的控件即时生效、
  * 有的要点保存，迟早有人踩。null 表示没有改动，这样干净时永远跟着后端配置走，
  * 不用写同步逻辑。
  *
@@ -128,6 +136,7 @@ export type ModelDraft = {
   modelOverrides: Record<string, ModelKind>;
   webSearchModeOverrides: Record<string, WebSearchMode>;
   imageRouteOverrides: Record<string, string>;
+  videoRouteOverrides: Record<string, string>;
 };
 
 /** 每个已添加后端的本地模型目录视图；读取它不会发起网络请求。 */
@@ -184,7 +193,7 @@ export function SettingsView({
             <TabsTrigger value="backend" className="shrink-0">后端</TabsTrigger>
             <TabsTrigger value="models" className="shrink-0">模型</TabsTrigger>
             <TabsTrigger value="search" className="shrink-0">联网</TabsTrigger>
-            <TabsTrigger value="routes" className="shrink-0">图片路由</TabsTrigger>
+            <TabsTrigger value="routes" className="shrink-0">图片/视频路由</TabsTrigger>
             <TabsTrigger value="voice" className="shrink-0">语音</TabsTrigger>
             <TabsTrigger value="behavior" className="shrink-0">行为</TabsTrigger>
           </TabsList>
@@ -607,14 +616,17 @@ function ModelSection({
   onDraftChange: (draft: ModelDraft | null) => void;
 }) {
   const [query, setQuery] = useState("");
-  const routes = useMemo(() => listImageRoutes(backend), [backend]);
-  const defaultRouteName = routes.find((route) => route.id === backend.defaultImageRoute)?.name ?? "图片端点";
+  const imageRoutes = useMemo(() => listImageRoutes(backend), [backend]);
+  const videoRoutes = useMemo(() => listVideoRoutes(backend), [backend]);
+  const defaultImageRouteName = imageRoutes.find((route) => route.id === backend.defaultImageRoute)?.name ?? "图片端点";
+  const defaultVideoRouteName = videoRoutes.find((route) => route.id === backend.defaultVideoRoute)?.name ?? "视频端点";
 
   const current: ModelDraft = draft ?? {
     savedModels: backend.savedModels,
     modelOverrides: backend.modelOverrides,
     webSearchModeOverrides: backend.webSearchModeOverrides,
     imageRouteOverrides: backend.imageRouteOverrides,
+    videoRouteOverrides: backend.videoRouteOverrides,
   };
   const dirty = draft !== null;
   const savedSet = useMemo(() => new Set(current.savedModels), [current.savedModels]);
@@ -658,6 +670,13 @@ function ModelSection({
     if (!routeId) delete next[modelId];
     else next[modelId] = routeId;
     edit({ imageRouteOverrides: next });
+  }
+
+  function setVideoRoute(modelId: string, routeId: string): void {
+    const next = { ...current.videoRouteOverrides };
+    if (!routeId) delete next[modelId];
+    else next[modelId] = routeId;
+    edit({ videoRouteOverrides: next });
   }
 
   function setWebSearchMode(modelId: string, mode: WebSearchMode): void {
@@ -763,8 +782,19 @@ function ModelSection({
                           onChange={(value) => setRoute(model.id, value === "__default" ? "" : value)}
                           ariaLabel={`${model.id} 走哪条图片路由`}
                           options={[
-                            { value: "__default", label: `默认（${defaultRouteName}）` },
-                            ...routes.map((route) => ({ value: route.id, label: route.name })),
+                            { value: "__default", label: `默认（${defaultImageRouteName}）` },
+                            ...imageRoutes.map((route) => ({ value: route.id, label: route.name })),
+                          ]}
+                        />
+                      ) : null}
+                      {kind === "video" ? (
+                        <MiniSelect
+                          value={current.videoRouteOverrides[model.id] ?? "__default"}
+                          onChange={(value) => setVideoRoute(model.id, value === "__default" ? "" : value)}
+                          ariaLabel={`${model.id} 走哪条视频路由`}
+                          options={[
+                            { value: "__default", label: `默认（${defaultVideoRouteName}）` },
+                            ...videoRoutes.map((route) => ({ value: route.id, label: route.name })),
                           ]}
                         />
                       ) : null}
@@ -796,6 +826,7 @@ function ModelSection({
                   modelOverrides: current.modelOverrides,
                   webSearchModeOverrides: current.webSearchModeOverrides,
                   imageRouteOverrides: current.imageRouteOverrides,
+                  videoRouteOverrides: current.videoRouteOverrides,
                 })) return;
                 onDraftChange(null);
                 toast.success(`已保存 ${checkedCount} 个模型`);
@@ -810,7 +841,10 @@ function ModelSection({
   );
 }
 
-/* ── 图片路由 ─────────────────────────────────────────────────────── */
+/* ── 媒体路由 ─────────────────────────────────────────────────────── */
+
+/** 编辑器只关心这几个字段，图片路由和视频路由都是它的超集。 */
+type RouteRow = { id: string; name: string; path: string; method: string };
 
 export function RouteSection({
   backend, onPatch,
@@ -818,87 +852,277 @@ export function RouteSection({
   backend: Backend;
   onPatch: (changes: Partial<Backend>) => boolean;
 }) {
+  return (
+    <div className="flex flex-col gap-6">
+      <ImageRouteSection backend={backend} onPatch={onPatch} />
+      <VideoRouteSection backend={backend} onPatch={onPatch} />
+    </div>
+  );
+}
+
+function ImageRouteSection({
+  backend, onPatch,
+}: {
+  backend: Backend;
+  onPatch: (changes: Partial<Backend>) => boolean;
+}) {
   const routes = listImageRoutes(backend);
+
+  function parse(json: string, editingId: string): CustomImageRoute | string {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (caught) {
+      return caught instanceof Error ? caught.message : "JSON 格式不对";
+    }
+    const result = customImageRouteSchema.safeParse(parsed);
+    if (!result.success) {
+      return result.error.issues.map((issue) => `${issue.path.join(".") || "根"}：${issue.message}`).join("\n");
+    }
+    if (isBuiltinRouteId(result.data.id)) return `id 不能叫 ${result.data.id}，这是内置路由的名字`;
+    if (backend.customImageRoutes.some((route) => route.id === result.data.id && route.id !== editingId)) {
+      return `已经有一条路由叫 ${result.data.id} 了`;
+    }
+    return result.data;
+  }
+
+  return (
+    <MediaRouteEditor
+      noun="图片"
+      routes={routes}
+      builtins={Object.values(BUILTIN_ROUTE_DEFS)}
+      custom={backend.customImageRoutes}
+      defaultRouteId={backend.defaultImageRoute}
+      onSetDefault={(id) => onPatch({ defaultImageRoute: id })}
+      onCreate={(sourceId) => {
+        const source = routes.find((route) => route.id === sourceId);
+        if (!source) return null;
+        const created = draftCustomRoute(source, `route_${Math.random().toString(36).slice(2, 8)}`);
+        if (!onPatch({ customImageRoutes: [...backend.customImageRoutes, created] })) return null;
+        return { id: created.id, json: JSON.stringify(created, null, 2) };
+      }}
+      jsonOf={(id) => JSON.stringify(backend.customImageRoutes.find((route) => route.id === id) ?? {}, null, 2)}
+      onSave={(editingId, json) => {
+        const result = parse(json, editingId);
+        if (typeof result === "string") return result;
+        const ok = onPatch({
+          customImageRoutes: backend.customImageRoutes.map((route) => (route.id === editingId ? result : route)),
+          // 改了 id 的话，指向旧 id 的模型和默认值一起跟过去
+          ...(editingId !== result.id
+            ? {
+              defaultImageRoute: backend.defaultImageRoute === editingId ? result.id : backend.defaultImageRoute,
+              imageRouteOverrides: Object.fromEntries(
+                Object.entries(backend.imageRouteOverrides).map(([model, id]) =>
+                  [model, id === editingId ? result.id : id],
+                ),
+              ),
+            }
+            : {}),
+        });
+        return ok ? null : "保存失败";
+      }}
+      onRemove={(id) => onPatch({
+        customImageRoutes: backend.customImageRoutes.filter((route) => route.id !== id),
+        defaultImageRoute: backend.defaultImageRoute === id ? "images" : backend.defaultImageRoute,
+        imageRouteOverrides: Object.fromEntries(
+          Object.entries(backend.imageRouteOverrides).filter(([, routeId]) => routeId !== id),
+        ),
+      })}
+      defaultHint={(
+        <>
+          没有单独指定路由的图片模型走这条。单个模型的路由在「模型」页上勾选后设置。
+          实测同一个模型在不同后端认的端点不一样 —— CPA 上的 Nano Banana 拒绝
+          <code className="mx-1 rounded bg-secondary px-1 py-0.5 font-mono">/images/generations</code>
+          只能走对话端点，这种事从模型名看不出来。
+        </>
+      )}
+      templateHint={(
+        <>
+          <p>
+            可用变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model prompt messageContent inputImages n size aspectRatio quality responseFormat</code>
+            （下划线写法同样认）。面板上只会显示模板真正用到的那几个参数控件。
+            参考图路由使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">messageContent</code>
+            生成 OpenAI 多模态消息，或直接使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">inputImages</code> 数组。
+            内置图片路由带参考图时会自动改用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">/images/edits</code>。
+          </p>
+          <p>
+            <code className="rounded bg-secondary px-1 py-0.5 font-mono">imageUrlPaths</code> /
+            <code className="rounded bg-secondary px-1 py-0.5 font-mono">b64JsonPaths</code> 是响应里的取图路径，
+            点号分隔、<code className="rounded bg-secondary px-1 py-0.5 font-mono">*</code> 展开数组，
+            例如 <code className="rounded bg-secondary px-1 py-0.5 font-mono">choices.*.message.images.*.image_url.url</code>。
+            留空就用通用提取（会一路深挖字段，也会认正文里的 <code className="rounded bg-secondary px-1 py-0.5 font-mono">![](url)</code>），
+            多数后端不用填；填了但一个都没命中时也会回落到通用提取。
+          </p>
+        </>
+      )}
+    />
+  );
+}
+
+function VideoRouteSection({
+  backend, onPatch,
+}: {
+  backend: Backend;
+  onPatch: (changes: Partial<Backend>) => boolean;
+}) {
+  const routes = listVideoRoutes(backend);
+
+  function parse(json: string, editingId: string): CustomVideoRoute | string {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (caught) {
+      return caught instanceof Error ? caught.message : "JSON 格式不对";
+    }
+    const result = customVideoRouteSchema.safeParse(parsed);
+    if (!result.success) {
+      return result.error.issues.map((issue) => `${issue.path.join(".") || "根"}：${issue.message}`).join("\n");
+    }
+    if (isBuiltinVideoRouteId(result.data.id)) return `id 不能叫 ${result.data.id}，这是内置路由的名字`;
+    if (backend.customVideoRoutes.some((route) => route.id === result.data.id && route.id !== editingId)) {
+      return `已经有一条路由叫 ${result.data.id} 了`;
+    }
+    return result.data;
+  }
+
+  return (
+    <MediaRouteEditor
+      noun="视频"
+      routes={routes}
+      builtins={Object.values(BUILTIN_VIDEO_ROUTE_DEFS)}
+      custom={backend.customVideoRoutes}
+      defaultRouteId={backend.defaultVideoRoute}
+      onSetDefault={(id) => onPatch({ defaultVideoRoute: id })}
+      onCreate={(sourceId) => {
+        const source = routes.find((route) => route.id === sourceId);
+        if (!source) return null;
+        const created = draftCustomVideoRoute(source, `vroute_${Math.random().toString(36).slice(2, 8)}`);
+        if (!onPatch({ customVideoRoutes: [...backend.customVideoRoutes, created] })) return null;
+        return { id: created.id, json: JSON.stringify(created, null, 2) };
+      }}
+      jsonOf={(id) => JSON.stringify(backend.customVideoRoutes.find((route) => route.id === id) ?? {}, null, 2)}
+      onSave={(editingId, json) => {
+        const result = parse(json, editingId);
+        if (typeof result === "string") return result;
+        const ok = onPatch({
+          customVideoRoutes: backend.customVideoRoutes.map((route) => (route.id === editingId ? result : route)),
+          ...(editingId !== result.id
+            ? {
+              defaultVideoRoute: backend.defaultVideoRoute === editingId ? result.id : backend.defaultVideoRoute,
+              videoRouteOverrides: Object.fromEntries(
+                Object.entries(backend.videoRouteOverrides).map(([model, id]) =>
+                  [model, id === editingId ? result.id : id],
+                ),
+              ),
+            }
+            : {}),
+        });
+        return ok ? null : "保存失败";
+      }}
+      onRemove={(id) => onPatch({
+        customVideoRoutes: backend.customVideoRoutes.filter((route) => route.id !== id),
+        defaultVideoRoute: backend.defaultVideoRoute === id ? "videos" : backend.defaultVideoRoute,
+        videoRouteOverrides: Object.fromEntries(
+          Object.entries(backend.videoRouteOverrides).filter(([, routeId]) => routeId !== id),
+        ),
+      })}
+      defaultHint={(
+        <>
+          没有单独指定路由的视频模型走这条。单个模型的路由在「模型」页上勾选后设置。
+          用 OpenAI 任务接口的提供商走
+          <code className="mx-1 rounded bg-secondary px-1 py-0.5 font-mono">/videos/generations</code>
+          （提交后轮询）；把视频生成直接挂在
+          <code className="mx-1 rounded bg-secondary px-1 py-0.5 font-mono">/chat/completions</code>
+          上的选对话端点，视频地址会从回复正文里取。
+        </>
+      )}
+      templateHint={(
+        <>
+          <p>
+            可用变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model prompt messageContent duration aspectRatio resolution sourceUrl</code>
+            （下划线写法同样认）。面板上只会显示模板真正用到的那几个参数控件 ——
+            对话端点不收时长和画面比例，选中它之后那几个下拉就不再出现。
+            图生视频用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">sourceUrl</code>
+            或 <code className="rounded bg-secondary px-1 py-0.5 font-mono">messageContent</code>（多模态消息）。
+          </p>
+          <p>
+            <code className="rounded bg-secondary px-1 py-0.5 font-mono">statusPath</code> 决定这条路由是异步还是同步：
+            填了就用它轮询任务状态（<code className="rounded bg-secondary px-1 py-0.5 font-mono">{"${requestId}"}</code> 会被替换成提交时拿到的任务 ID），
+            留空表示同步 —— 提交响应里就该有视频地址，没有就直接报错，不去轮询一个不存在的端点。
+          </p>
+          <p>
+            <code className="rounded bg-secondary px-1 py-0.5 font-mono">videoUrlPaths</code> 是响应里的取视频路径，
+            点号分隔、<code className="rounded bg-secondary px-1 py-0.5 font-mono">*</code> 展开数组。
+            留空就用通用提取（深挖 <code className="rounded bg-secondary px-1 py-0.5 font-mono">video_url</code> 一类字段，
+            也会认正文里的 markdown 链接和 <code className="rounded bg-secondary px-1 py-0.5 font-mono">.mp4</code> 裸链接），
+            多数后端不用填。
+          </p>
+          <p>「编辑」「延长」两个操作只有内置视频端点支持，选其它路由时面板会把它们收起来。</p>
+        </>
+      )}
+    />
+  );
+}
+
+/**
+ * 路由编辑器的 UI 和交互。图片和视频共用 —— 两边的差别只在 schema 校验和
+ * 落盘时改哪几个字段上，那部分由调用方通过回调提供。
+ */
+function MediaRouteEditor({
+  noun, routes, builtins, custom, defaultRouteId,
+  onSetDefault, onCreate, jsonOf, onSave, onRemove, defaultHint, templateHint,
+}: {
+  noun: string;
+  /** 内置 + 自定义，供默认路由下拉和「复制改」取源 */
+  routes: RouteRow[];
+  builtins: RouteRow[];
+  custom: RouteRow[];
+  defaultRouteId: string;
+  onSetDefault: (id: string) => void;
+  /** 从某条路由复制出一条新的自定义路由；返回新路由的 id 和它的 JSON 文本 */
+  onCreate: (sourceId: string) => { id: string; json: string } | null;
+  jsonOf: (id: string) => string;
+  /** 保存草稿；返回错误信息，或 null 表示成功 */
+  onSave: (editingId: string, json: string) => string | null;
+  /** 返回 false 表示没写进去（浏览器存储满等），这时编辑框要留着 */
+  onRemove: (id: string) => boolean;
+  defaultHint: React.ReactNode;
+  templateHint: React.ReactNode;
+}) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [draftError, setDraftError] = useState("");
 
-  function startEdit(route: CustomImageRoute): void {
-    setEditingId(route.id);
-    setDraft(JSON.stringify(route, null, 2));
+  function startEdit(id: string, json: string): void {
+    setEditingId(id);
+    setDraft(json);
     setDraftError("");
   }
 
-  function addFrom(source: CustomImageRoute): void {
-    const id = `route_${Math.random().toString(36).slice(2, 8)}`;
-    const created = draftCustomRoute(source, id);
-    if (!onPatch({ customImageRoutes: [...backend.customImageRoutes, created] })) return;
-    startEdit(created);
+  function addFrom(sourceId: string): void {
+    const created = onCreate(sourceId);
+    if (!created) return;
+    startEdit(created.id, created.json);
   }
 
   function saveDraft(): void {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(draft);
-    } catch (caught) {
-      setDraftError(caught instanceof Error ? caught.message : "JSON 格式不对");
+    if (!editingId) return;
+    const error = onSave(editingId, draft);
+    if (error) {
+      setDraftError(error);
       return;
     }
-    const result = customImageRouteSchema.safeParse(parsed);
-    if (!result.success) {
-      setDraftError(result.error.issues.map((issue) => `${issue.path.join(".") || "根"}：${issue.message}`).join("\n"));
-      return;
-    }
-    if (isBuiltinRouteId(result.data.id)) {
-      setDraftError(`id 不能叫 ${result.data.id}，这是内置路由的名字`);
-      return;
-    }
-    const exists = backend.customImageRoutes.some(
-      (route) => route.id === result.data.id && route.id !== editingId,
-    );
-    if (exists) {
-      setDraftError(`已经有一条路由叫 ${result.data.id} 了`);
-      return;
-    }
-
-    if (!onPatch({
-      customImageRoutes: backend.customImageRoutes.map((route) =>
-        route.id === editingId ? result.data : route,
-      ),
-      // 改了 id 的话，指向旧 id 的模型和默认值一起跟过去
-      ...(editingId && editingId !== result.data.id
-        ? {
-          defaultImageRoute: backend.defaultImageRoute === editingId ? result.data.id : backend.defaultImageRoute,
-          imageRouteOverrides: Object.fromEntries(
-            Object.entries(backend.imageRouteOverrides).map(([model, id]) =>
-              [model, id === editingId ? result.data.id : id],
-            ),
-          ),
-        }
-        : {}),
-    })) return;
     setEditingId(null);
     setDraftError("");
     toast.success("路由已保存");
   }
 
-  function removeRoute(id: string): void {
-    if (!onPatch({
-      customImageRoutes: backend.customImageRoutes.filter((route) => route.id !== id),
-      defaultImageRoute: backend.defaultImageRoute === id ? "images" : backend.defaultImageRoute,
-      imageRouteOverrides: Object.fromEntries(
-        Object.entries(backend.imageRouteOverrides).filter(([, routeId]) => routeId !== id),
-      ),
-    })) return;
-    if (editingId === id) setEditingId(null);
-  }
-
   return (
     <div className="flex flex-col gap-3">
       <section className="rounded-lg border p-4">
-        <h2 className="text-sm font-medium">默认路由</h2>
+        <h2 className="text-sm font-medium">默认{noun}路由</h2>
         <div className="mt-2">
-          <Select value={backend.defaultImageRoute} onValueChange={(value) => onPatch({ defaultImageRoute: value })}>
+          <Select value={defaultRouteId} onValueChange={onSetDefault}>
             <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
               {routes.map((route) => (
@@ -907,18 +1131,13 @@ export function RouteSection({
             </SelectContent>
           </Select>
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          没有单独指定路由的图片模型走这条。单个模型的路由在「模型」页上勾选后设置。
-          实测同一个模型在不同后端认的端点不一样 —— CPA 上的 Nano Banana 拒绝
-          <code className="mx-1 rounded bg-secondary px-1 py-0.5 font-mono">/images/generations</code>
-          只能走对话端点，这种事从模型名看不出来。
-        </p>
+        <p className="mt-2 text-xs text-muted-foreground">{defaultHint}</p>
       </section>
 
       <section className="rounded-lg border p-4">
-        <h2 className="text-sm font-medium">内置路由</h2>
+        <h2 className="text-sm font-medium">内置{noun}路由</h2>
         <div className="mt-2 flex flex-col gap-2">
-          {Object.values(BUILTIN_ROUTE_DEFS).map((route) => (
+          {builtins.map((route) => (
             <div key={route.id} className="flex items-center gap-2 rounded-md bg-secondary/50 px-3 py-2">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-medium">{route.name}</p>
@@ -926,7 +1145,7 @@ export function RouteSection({
               </div>
               <Button
                 variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs"
-                onClick={() => addFrom(route)}
+                onClick={() => addFrom(route.id)}
               >
                 <Copy className="size-3" />复制改
               </Button>
@@ -937,20 +1156,20 @@ export function RouteSection({
 
       <section className="rounded-lg border p-4">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-medium">自定义路由</h2>
+          <h2 className="text-sm font-medium">自定义{noun}路由</h2>
           <Button
             variant="ghost" size="sm" className="ml-auto h-8 gap-1 px-2 text-xs"
-            onClick={() => addFrom(BUILTIN_ROUTE_DEFS.chat)}
+            onClick={() => addFrom(builtins[builtins.length - 1]?.id ?? builtins[0]?.id ?? "")}
           >
             <Plus className="size-3.5" />新建
           </Button>
         </div>
 
-        {backend.customImageRoutes.length === 0 ? (
+        {custom.length === 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">还没有自定义路由。从上面复制一条内置的改最省事。</p>
         ) : (
           <div className="mt-2 flex flex-col gap-2">
-            {backend.customImageRoutes.map((route) => (
+            {custom.map((route) => (
               <div key={route.id} className="rounded-md border">
                 <div className="flex items-center gap-2 px-3 py-2">
                   <div className="min-w-0 flex-1">
@@ -959,14 +1178,17 @@ export function RouteSection({
                   </div>
                   <Button
                     variant="ghost" size="icon" className="size-7 shrink-0"
-                    onClick={() => (editingId === route.id ? setEditingId(null) : startEdit(route))}
+                    onClick={() => (editingId === route.id ? setEditingId(null) : startEdit(route.id, jsonOf(route.id)))}
                     aria-label={`编辑 ${route.name}`}
                   >
                     <Pencil className="size-3.5" />
                   </Button>
                   <Button
                     variant="ghost" size="icon" className="size-7 shrink-0"
-                    onClick={() => removeRoute(route.id)}
+                    onClick={() => {
+                      if (!onRemove(route.id)) return;
+                      if (editingId === route.id) setEditingId(null);
+                    }}
                     aria-label={`删除 ${route.name}`}
                   >
                     <Trash2 className="size-3.5" />
@@ -1004,21 +1226,7 @@ export function RouteSection({
             会按原类型替换，取不到值的键会被整个剪掉，可选参数因此不用写条件；
             串里的 <code className="rounded bg-secondary px-1 py-0.5 font-mono">{"${prompt}"}</code> 按字符串插值。
           </p>
-          <p>
-            可用变量：<code className="rounded bg-secondary px-1 py-0.5 font-mono">model prompt messageContent inputImages n size aspectRatio quality responseFormat</code>
-            （下划线写法同样认）。面板上只会显示模板真正用到的那几个参数控件。
-            参考图路由使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">messageContent</code>
-            生成 OpenAI 多模态消息，或直接使用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">inputImages</code> 数组。
-            内置图片路由带参考图时会自动改用 <code className="rounded bg-secondary px-1 py-0.5 font-mono">/images/edits</code>。
-          </p>
-          <p>
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono">imageUrlPaths</code> /
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono">b64JsonPaths</code> 是响应里的取图路径，
-            点号分隔、<code className="rounded bg-secondary px-1 py-0.5 font-mono">*</code> 展开数组，
-            例如 <code className="rounded bg-secondary px-1 py-0.5 font-mono">choices.*.message.images.*.image_url.url</code>。
-            留空就用通用提取（会一路深挖字段，也会认正文里的 <code className="rounded bg-secondary px-1 py-0.5 font-mono">![](url)</code>），
-            多数后端不用填；填了但一个都没命中时也会回落到通用提取。
-          </p>
+          {templateHint}
         </div>
       </section>
     </div>

@@ -122,13 +122,55 @@ gzip 162 KB。
 | 视频面板 | `src/features/video/video-panel.tsx`、`src/transport/videos.ts` | ✅ 生成/编辑/延长、媒体上传、轮询、取消与播放 |
 | 语音面板 | `src/features/voice/voice-panel.tsx`、`src/transport/voice.ts` | ✅ TTS/STT 可跨后端，支持 Grok 原生/OpenAI Audio/自定义 TTS 路由；声线仅手动加载 |
 | 语音路由 | `src/transport/voice-routing.ts`、`src/transport/tts-routes.ts` | ✅ STT/TTS 各自引用已有后端；支持 MiMo Chat TTS 模板、自动协议、旧配置回退、失效路由与 proxy 错误 |
-| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类/联网方式覆盖、图片/TTS 路由、联网源、STT/TTS 供应商与模型、行为设置、删除全部记录 |
+| 设置页 | `src/features/settings/settings-view.tsx` | ✅ 后端可编辑、面板手勾、模型归类/联网方式覆盖、图片/视频/TTS 路由、联网源、STT/TTS 供应商与模型、行为设置、删除全部记录 |
 | 图片路由 | `src/transport/image-routes.ts` | ⚠️ 单测过，未打真后端 |
+| 视频路由 | `src/transport/video-routes.ts` | ⚠️ 单测过，未打真后端 |
+| 路由模板引擎 | `src/transport/route-template.ts` | ✅ 图片/视频/TTS 三处共用 |
 | 行为设置 | `src/shared/settings/app-settings.ts` | ✅ 提交方式、清空输入、完成通知、图片等待上限、函数搜索源 |
 | Worker | `worker/*.ts` | ✅ R2 上传、搜索聚合/鉴权/响应上限、路径穿越、CSP |
 
 三个创作面板已经在 `src/app/app.tsx` 接入，原来的 `ComingSoon` 已删除。
 同时修正了聊天默认模型候选：聊天会话只使用已保存的 chat 模型，不会误选图片或视频模型。
+
+## 最近完成（视频路由：把自定义路由从图片专属推广到视频）
+
+起因：用户接了一个视频生成提供商，它的接口是 OpenAI `/chat/completions`，而路由机制
+当时只服务图片模型 —— 设置页那个路由下拉框的条件是 `kind === "image"`，视频那边
+`/videos/generations`、`/videos/edits`、`/videos/extensions` 和状态轮询全是硬编码。
+
+- `src/transport/route-template.ts` 是新抽出的模板引擎：`resolveTemplate`、
+  `selectByPath`、`scanTemplateVariables`、`resolveRouteRequest`。图片、视频、TTS
+  三处共用，请求侧的展开规则从此只有一份。
+- **`resolveTemplate` 有一处行为变更**：原本有内容、但每个键都被剪掉的对象，现在
+  自己也会被剪掉（模板里写死的 `{}` 保留）。视频内置路由的
+  `image: { url: "$sourceUrl" }` 靠这条在没有源图时整块消失；`tts-routes.test.ts`
+  里那条断言 `nested: {}` 的用例同步改掉了。
+- `Backend` 新增 `customVideoRoutes` / `videoRouteOverrides` / `defaultVideoRoute`，
+  与图片三件套对称。旧配置解析时由 zod default 补齐，不需要迁移代码。
+- 内置两条视频路由（`src/transport/video-routes.ts`）：`videos` 就是原来的任务接口
+  行为（默认），`chat` 打 `/chat/completions` 同步返回。**用户那个提供商选内置 `chat`
+  即可，不用写 JSON。**
+- `statusPath` 区分异步和同步：填了就用它轮询（`${requestId}` 替换并 URL 编码），
+  留空表示同步 —— 提交响应里没有视频地址就直接报错，不去轮询不存在的端点。
+- 取视频三层兜底：路由的 `videoUrlPaths` → 结构化字段深挖 → 回复正文扫描。
+  正文扫描认带 `.mp4`/`.webm` 一类扩展名的链接（最可信），没有扩展名时退回第一条
+  普通 markdown 链接（签名 URL 常不带扩展名），`![](…)` 当封面图跳过。
+- `requestVideoPayloads` 顶掉了原来的 `requestJSON`：整包 JSON、SSE/NDJSON 帧、
+  纯文本一条链接三种形状都收敛成 payload 数组。顺带修掉一个旧问题 —— 上游返回
+  `status: failed` + 错误原因但没有任务 ID 时，原来会抛"没有 request_id"把真正的
+  失败原因盖掉。
+- 编辑 / 延长只有内置 `videos` 路由支持，其它路由下面板直接收起这两个操作；
+  面板还用 `videoRouteVariables` 隐藏路由根本不会发送的时长/比例/清晰度控件，
+  和生图面板同一套做法。
+- 设置页「图片路由」标签改成「图片/视频路由」，两段共用 `MediaRouteEditor`，
+  各自提供 schema 校验和落盘补丁。模型页上 video 模型也有了路由下拉框，
+  `ModelDraft` 相应多了 `videoRouteOverrides`。
+- 顺手把 `joinURL` 从 `chat-completions.ts` 挪到 `src/transport/url.ts` ——
+  模型目录、语音、路由模板都只要这四行，跟着 import 整个对话协议模块进共享 chunk
+  不合适。构建产物首屏总量与改动前持平。
+
+本轮验证：`pnpm check`、`pnpm test`（46 个文件、421/421）、`pnpm build` 均通过；
+**没有向任何真实后端发过请求**，视频路由的实测项见「当前仍需验证」第 7b 条。
 
 ## 最近完成（自定义 TTS 路由与 MiMo Chat TTS）
 
@@ -528,6 +570,7 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
   key 现在只留 `backend.id` + `baseURL`（真正影响网络结果的东西），
   勾选/归类这些只影响标注，用 `applyBackendConfig()` 在查询外面重算。
 - 勾选、归类、图片路由三样一起进一个 `ModelDraft`，底部「保存 / 放弃」。
+  （后来又加了视频路由，现在是四样。）
   `null` 表示没改动，干净时永远跟着后端配置走，不用写同步逻辑。
 - 草稿 state 放在 `Console` 而不是设置页 —— 设置页一关就卸载，
   勾了一半跳去看一眼对话再回来不该白勾。
@@ -585,6 +628,15 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
      （通用提取够不够，还是得填 `imageUrlPaths`）。
    - grok2api 走 `chat` 路由生图。用户说它支持这个格式，但没验过响应形状。
    验的时候记住下面那条红线，一次一个请求，不要扫参数。
+7b. **视频路由同样只做过单测**（`src/transport/video-routes.ts`）。要验的是：
+   - 把某个视频模型的路由切成内置 `chat`，看提供商把视频地址放在正文的什么位置 ——
+     通用提取会先认带 `.mp4`/`.webm` 扩展名的链接，没有扩展名时退回第一条普通
+     markdown 链接。如果它返回的是别的形状（例如 `choices[].message.video`），
+     就得填 `videoUrlPaths`。
+   - 内置 `videos` 路由的回归：改成模板展开后，`duration` / `aspect_ratio` /
+     `resolution` / `image.url` 的取舍与之前一致（没有源图时整个 `image` 键消失），
+     单测覆盖了，但真后端没跑过。
+   - 异步自定义路由的 `statusPath`：目前只有内置 `/videos/${requestId}` 打过真接口。
 8. **本轮语音路由尚未打真供应商**：分别用一个 Grok 原生和一个 OpenAI Audio 后端各做一次 STT/TTS，确认 CORS、请求字段和响应形状；同时人工确认切供应商不联网、模型只在点「获取」后请求、Grok 声线只在点「加载声线」后请求。远程音频下载的 CORS、STT 大文件上限也还没测。`proxy` 语音是已知未接入，不要把它当成待测直连能力。
 9. **此前新增，未实测**：IndexedDB 从 v1 升到 v2 的迁移只在全新库上跑过，
    带着旧会话数据的库升级没验；生成记录攒满 50 条后的裁剪也只是代码层面正确。
@@ -592,8 +644,8 @@ vendor 推断挡住了：模型 id 里没写 gemini / grok 时整个按钮凭空
 10. **可选**：Responses 协议适配器（`src/transport/responses.ts`）。
    CPA 的 `/responses` 和 `/messages` 都确认存在（上一轮实测：无鉴权 401、带 key 400），
    要做的话有端点可打。目前只实现了 chat/completions；Claude 的客户端函数搜索已不依赖它，只有接 Claude 原生搜索才需要 `/v1/messages`。
-11. **可选**：自定义路由暂不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
-   真需要时参照 `src/transport/videos.ts` 的轮询实现再加。
+11. **可选**：图片自定义路由仍不支持异步任务轮询。目前接触到的图片端点都是同步返回的，
+   真需要时参照视频路由的 `statusPath` 做法搬过去。
 
 ## ⚠️ 联调时的红线
 

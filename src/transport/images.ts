@@ -3,9 +3,10 @@ import {
   imageRouteFor,
   imageRouteSupportsInputImages,
   resolveImageRoute,
-  selectByPath,
   type ResolvedImageRoute,
 } from "@/transport/image-routes";
+import { selectByPath } from "@/transport/route-template";
+import { collectText } from "@/transport/media-text";
 import {
   TransportError,
   firstString,
@@ -15,7 +16,7 @@ import {
   readError,
   toTransportError,
 } from "@/transport/errors";
-import { isErrorFrame, readSSE, type SSEFrame } from "@/transport/sse";
+import { isErrorFrame, readBufferedFrames, readSSE, type SSEFrame } from "@/transport/sse";
 import { createRequestTimeoutScope, TimeoutError } from "@/transport/request-timeout";
 import type { ImageResult } from "@/transport/types";
 
@@ -523,32 +524,7 @@ export function readImagesDeep(payload: unknown, baseURL: string): ImageResult[]
   return images;
 }
 
-/** 只扫这几个键下的字符串，免得把错误信息里的 URL 也当成图片。 */
-const TEXT_KEYS = new Set(["content", "text", "output_text", "markdown"]);
-
-function collectText(payload: unknown): string[] {
-  const out: string[] = [];
-  const seen = new WeakSet<object>();
-
-  const visit = (value: unknown, key: string, depth: number): void => {
-    if (depth > 10) return;
-    if (typeof value === "string") {
-      if (TEXT_KEYS.has(key) && value.trim()) out.push(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, key, depth + 1);
-      return;
-    }
-    if (!isRecord(value) || seen.has(value)) return;
-    seen.add(value);
-    for (const [childKey, child] of Object.entries(value)) visit(child, childKey, depth + 1);
-  };
-
-  visit(payload, "root", 0);
-  return out;
-}
-
+/** 只扫这几个键下的字符串，免得把错误信息里的 URL 也当成图片。见 media-text.ts。 */
 const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)/g;
 const DATA_IMAGE_URL = /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
 // 裸 URL 只收有图片扩展名的 —— 没扩展名的链接扫进来误报太多
@@ -669,28 +645,4 @@ function resolveImageURL(value: string, baseURL: string): string {
   } catch {
     return url;
   }
-}
-
-/** text/plain 下也有后端输出 SSE / NDJSON；整包读完后按帧兼容。 */
-function readBufferedFrames(responseText: string): SSEFrame[] {
-  const normalized = responseText.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-  const frames: SSEFrame[] = [];
-
-  for (const block of normalized.split(/\n\n+/)) {
-    let event: string | undefined;
-    const data: string[] = [];
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-    }
-    if (data.length > 0) frames.push({ event, data: data.join("\n") });
-  }
-  if (frames.length > 0) return frames;
-
-  // 没有 data: 前缀时再尝试一行一个 JSON 的 NDJSON。
-  const lines = normalized.split("\n").map((line) => line.trim()).filter(Boolean);
-  if (lines.length > 1 && lines.every((line) => line === "[DONE]" || parseJSON(line) !== null)) {
-    return lines.map((data) => ({ data }));
-  }
-  return [];
 }
